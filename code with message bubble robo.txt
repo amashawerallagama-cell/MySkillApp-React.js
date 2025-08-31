@@ -1,0 +1,3129 @@
+import React, { useState, useEffect, createContext, useContext, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import {
+    getAuth,
+    signInAnonymously,
+    signInWithCustomToken,
+    onAuthStateChanged,
+    signOut,
+    createUserWithEmailAndPassword,
+    signInWithEmailAndPassword,
+    updateProfile
+} from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, doc, setDoc, updateDoc, arrayUnion, deleteDoc, limit, getDocs, writeBatch } from 'firebase/firestore';
+
+// --- ErrorBoundary Component for graceful error handling ---
+class ErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null, errorInfo: null };
+    }
+
+    static getDerivedStateFromError(error) {
+        // Update state so the next render shows the fallback UI.
+        return { hasError: true };
+    }
+
+    componentDidCatch(error, errorInfo) {
+        // You can also log the error to an error reporting service
+        console.error("ErrorBoundary caught an error:", error, errorInfo);
+        this.setState({
+            error: error,
+            errorInfo: errorInfo
+        });
+    }
+
+    render() {
+        if (this.state.hasError) {
+            // You can render any custom fallback UI
+            return (
+                <div className="flex flex-col items-center justify-center min-h-screen bg-red-50 text-red-800 p-8">
+                    <h2 className="text-3xl font-bold mb-4">Oops! Something went wrong.</h2>
+                    <p className="text-lg mb-6">We're sorry for the inconvenience. Please try refreshing the page.</p>
+                    <details className="text-sm bg-red-100 p-4 rounded-lg">
+                        <summary className="cursor-pointer font-semibold">Error Details</summary>
+                        <pre className="whitespace-pre-wrap break-words mt-2 text-red-700">
+                            {this.state.error && this.state.error.toString()}
+                            <br />
+                            {this.state.errorInfo && this.state.errorInfo.componentStack}
+                        </pre>
+                    </details>
+                    <button
+                        onClick={() => window.location.reload()}
+                        className="mt-6 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition-all duration-300 transform hover:scale-105"
+                    >
+                        Reload Page
+                    </button>
+                </div>
+            );
+        }
+
+        return this.props.children;
+    }
+}
+
+// --- AuthContext for sharing Firebase instances and user state ---
+const AuthContext = createContext(null);
+
+const AuthProvider = ({ children }) => {
+    const [app, setApp] = useState(null);
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [loadingAuth, setLoadingAuth] = useState(true); // To indicate if initial Firebase setup is complete
+    const [authReady, setAuthReady] = useState(false); // To indicate if Firebase Auth has completed its initial check
+    const [userProfile, setUserProfile] = useState(null);
+
+    useEffect(() => {
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'skill-app-a7b53';
+        // Firebase configuration, updated with the new API key for Firebase
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "AIzaSyBAqfIvRUGiCL7LpKxQCizuqiZEkbhUkXo", // New Firebase API Key
+            authDomain: "skill-app-a7b53.firebaseapp.com",
+            projectId: "skill-app-a7b53",
+            storageBucket: "skill-app-a7b53.firebasestorage.app",
+            messagingSenderId: "12606305729",
+            appId: "1:12606305729:web:d734fe705e341e75f62b40",
+            measurementId: "G-L4HRY4RRFY"
+        };
+
+        let unsubscribeAuth = () => {};
+        let unsubscribeProfile = () => {};
+
+        const initializeFirebase = async () => {
+            try {
+                const firebaseApp = initializeApp(firebaseConfig);
+                const firestoreDb = getFirestore(firebaseApp);
+                const firebaseAuth = getAuth(firebaseApp);
+
+                setApp(firebaseApp);
+                setDb(firestoreDb);
+                setAuth(firebaseAuth);
+                setLoadingAuth(false); // Firebase app and services are initialized
+
+                unsubscribeAuth = onAuthStateChanged(firebaseAuth, async (user) => {
+                    let currentUserId = null;
+                    if (user) {
+                        currentUserId = user.uid;
+                        setUserId(currentUserId);
+                        console.log("Auth State: User logged in. UID:", currentUserId);
+
+                        // Fetch or create user profile ONLY if user is logged in
+                        if (firestoreDb) {
+                            const profileDocRef = doc(firestoreDb, `artifacts/${appId}/users/${currentUserId}/profile/userProfile`);
+
+                            if (unsubscribeProfile) {
+                                unsubscribeProfile();
+                            }
+
+                            unsubscribeProfile = onSnapshot(profileDocRef, (docSnap) => {
+                                if (docSnap.exists()) {
+                                    setUserProfile(docSnap.data());
+                                    console.log("User profile loaded/updated:", docSnap.data());
+                                } else {
+                                    // Create a new user profile with default values if it doesn't exist
+                                    console.log("Creating new user profile for UID:", currentUserId);
+                                    // Use user.displayName if available, otherwise fallback
+                                    const defaultName = user?.displayName || user?.email?.split('@')[0] || `User_${currentUserId.substring(0, 8)}`;
+                                    setDoc(profileDocRef, {
+                                        name: defaultName,
+                                        createdAt: serverTimestamp(),
+                                        skillPreferences: '',
+                                        points: 0,
+                                        dailyStreak: 0,
+                                        lastAdviceDate: null,
+                                        skillsToTrack: [],
+                                        specialNotes: [],
+                                        skillsToLearn: [],
+                                        skillsToTeach: []
+                                    }, { merge: true }).then(() => {
+                                        setUserProfile({
+                                            name: defaultName,
+                                            skillPreferences: '',
+                                            points: 0,
+                                            dailyStreak: 0,
+                                            lastAdviceDate: null,
+                                            skillsToTrack: [],
+                                            specialNotes: [],
+                                            skillsToLearn: [],
+                                            skillsToTeach: []
+                                        });
+                                        console.log("New user profile created or merged successfully.");
+                                    }).catch(err => {
+                                        console.error("Error creating user profile:", err);
+                                    });
+                                }
+                                setAuthReady(true); // Auth state and profile loaded
+                            }, (error) => {
+                                console.error("Error listening to user profile:", error);
+                                setAuthReady(true); // Auth state still determined even if profile load fails
+                            });
+                        } else {
+                            console.error("Firestore DB not initialized for profile fetch.");
+                            setAuthReady(true);
+                        }
+
+                    } else {
+                        // No user logged in, clear user state and indicate auth is ready
+                        console.log("Auth State: No user. Setting userId to null.");
+                        setUserId(null);
+                        setUserProfile(null);
+                        if (unsubscribeProfile) {
+                            unsubscribeProfile(); // Stop listening to old profile if any
+                        }
+                        setAuthReady(true); // No user, but auth state check is complete
+                    }
+                });
+
+            } catch (error) {
+                console.error("Failed to initialize Firebase:", error);
+                setLoadingAuth(false);
+                setAuthReady(true); // Indicate auth process is done, even with error
+            }
+        };
+
+        initializeFirebase();
+
+        return () => {
+            unsubscribeAuth();
+            if (unsubscribeProfile) {
+                unsubscribeProfile();
+            }
+        };
+    }, []);
+
+    const loginEmailPassword = async (email, password) => {
+        if (!auth) throw new Error("Firebase Auth not initialized.");
+        console.log("Attempting to sign in with email/password...");
+        return signInWithEmailAndPassword(auth, email, password);
+    };
+
+    // Modified signupEmailPassword to include username
+    const signupEmailPassword = async (email, password, username) => {
+        if (!auth) throw new Error("Firebase Auth not initialized.");
+        console.log("Attempting to create user with email/password...");
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        // Set display name immediately after creation
+        console.log("Updating user profile with displayName:", username);
+        await updateProfile(userCredential.user, { displayName: username });
+        return userCredential;
+    };
+
+    const signOutUser = async () => {
+        if (auth) {
+            console.log("Attempting to sign out user...");
+            await signOut(auth);
+            setUserId(null);
+            setUserProfile(null);
+            console.log("User signed out.");
+        }
+    };
+
+
+    const value = {
+        app,
+        db,
+        auth,
+        userId,
+        loadingAuth, // Still useful for initial Firebase setup status
+        authReady,   // New: Indicates if onAuthStateChanged has run its initial check
+        userProfile,
+        setUserProfile,
+        loginEmailPassword,
+        signupEmailPassword,
+        signOutUser,
+    };
+
+    return (
+        <AuthContext.Provider value={value}>
+            {children}
+        </AuthContext.Provider>
+    );
+};
+
+// --- Custom Hook to use AuthContext ---
+const useAuth = () => {
+    return useContext(AuthContext);
+};
+
+// --- Helper to get app ID (this refers to Firebase Project ID) ---
+const getAppId = () => typeof __app_id !== 'undefined' ? __app_id : 'skill-app-a7b53';
+
+
+// --- COMPONENTS ---
+
+// New AuthPage Component
+const AuthPage = () => {
+    const { loginEmailPassword, signupEmailPassword, loadingAuth, authReady, userId, setUserProfile } = useAuth();
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [username, setUsername] = useState(''); // New state for username
+    const [isLogin, setIsLogin] = useState(true); // true for login, false for signup
+    const [message, setMessage] = useState('');
+    const [loadingAction, setLoadingAction] = useState(false);
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setMessage('');
+        setLoadingAction(true);
+
+        try {
+            if (isLogin) {
+                await loginEmailPassword(email, password);
+                setMessage('Login successful!');
+            } else {
+                if (!username.trim()) {
+                    setMessage('Please enter a username.');
+                    setLoadingAction(false);
+                    return;
+                }
+                await signupEmailPassword(email, password, username);
+                setMessage('Account created and logged in successfully!');
+                // Manually update userProfile state here for immediate feedback if needed,
+                // though onAuthStateChanged should also pick this up.
+                setUserProfile(prev => ({ ...prev, name: username }));
+            }
+        } catch (error) {
+                // Check if the error is due to "auth/email-already-in-use"
+                if (error.code === 'auth/email-already-in-use') {
+                    setMessage('This email is already registered. Please try logging in or use a different email.');
+                } else {
+                    setMessage(error.message); // Display other error messages to user
+                }
+                console.error("Auth error:", error);
+        } finally {
+            setLoadingAction(false);
+        }
+    };
+
+    if (loadingAuth || !authReady) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-100">
+                <div className="text-xl text-gray-700 animate-pulse">Loading application...</div>
+            </div>
+        );
+    }
+
+    if (userId) {
+        // If userId exists, it means the user is already authenticated
+        // This component should not be visible. Return null or a loader if necessary.
+        return null;
+    }
+
+    return (
+        <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-blue-100 to-white animate-fade-in">
+            <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-md transform transition-all duration-300 hover:scale-[1.01] bg-opacity-90 backdrop-blur-sm">
+                <h2 className="text-3xl font-bold text-gray-800 mb-6 text-center">
+                    {isLogin ? 'Welcome Back!' : 'Join Us Today!'}
+                </h2>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    {!isLogin && ( // Show username input only for signup
+                        <div>
+                            <label htmlFor="username" className="block text-gray-700 text-sm font-medium mb-1">Username</label>
+                            <input
+                                type="text"
+                                id="username"
+                                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-800"
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value)}
+                                required={!isLogin} // Make required only for signup
+                                disabled={loadingAction}
+                            />
+                        </div>
+                    )}
+                    <div>
+                        <label htmlFor="email" className="block text-gray-700 text-sm font-medium mb-1">Email</label>
+                        <input
+                            type="email"
+                            id="email"
+                            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-800"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            required
+                            disabled={loadingAction}
+                        />
+                    </div>
+                    <div>
+                        <label htmlFor="password" className="block text-gray-700 text-sm font-medium mb-1">Password</label>
+                        <input
+                            type="password"
+                            id="password"
+                            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-800"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            required
+                            disabled={loadingAction}
+                        />
+                    </div>
+                    <button
+                        type="submit"
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                        disabled={loadingAction}
+                    >
+                        {loadingAction ? (isLogin ? 'Logging In...' : 'Signing Up...') : (isLogin ? 'Login' : 'Sign Up')}
+                    </button>
+                </form>
+
+                <div className="mt-4 text-center text-gray-600">
+                    <span className="mr-2">{isLogin ? "Don't have an account?" : "Already have an account?"}</span>
+                    <button
+                        onClick={() => setIsLogin(!isLogin)}
+                        className="text-blue-600 hover:text-blue-800 font-medium"
+                        disabled={loadingAction}
+                    >
+                        {isLogin ? 'Sign Up' : 'Login'}
+                    </button>
+                </div>
+
+                {message && (
+                    <p className="mt-4 text-center text-sm font-medium text-red-600">{message}</p>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
+// 1. Personalized Daily Advice
+const DailyAdvice = () => {
+    const { db, userId, loadingAuth, userProfile, setUserProfile } = useAuth();
+    const [advice, setAdvice] = useState('');
+    const [loadingAdvice, setLoadingAdvice] = useState(false);
+    const [skillPreferences, setSkillPreferences] = useState(userProfile?.skillPreferences || '');
+    const [message, setMessage] = useState('');
+    const [adviceHistory, setAdviceHistory] = useState({}); // Stores history grouped by topic
+    const [selectedHistoricalAdvice, setSelectedHistoricalAdvice] = useState(null); // For displaying full history
+
+    useEffect(() => {
+        if (userProfile) {
+            setSkillPreferences(userProfile.skillPreferences || '');
+        }
+    }, [userProfile]);
+
+    useEffect(() => {
+        if (!db || !userId || loadingAuth) {
+            return;
+        }
+        const appId = getAppId();
+        const adviceCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/dailyAdvice`);
+        const q = query(adviceCollectionRef, orderBy('timestamp', 'desc'), limit(10)); // Fetch last 10 advices
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const fetchedHistory = {};
+            snapshot.docs.forEach(docSnap => {
+                const data = docSnap.data();
+                // Group by AI-generated topic if available, else by preferences, else 'General'
+                const topic = data.topic || data.preferences || 'General Advice';
+                if (!fetchedHistory[topic]) {
+                    fetchedHistory[topic] = [];
+                }
+                fetchedHistory[topic].push({ id: docSnap.id, ...data });
+            });
+            setAdviceHistory(fetchedHistory);
+        }, (error) => {
+            console.error("Error fetching advice history:", error);
+        });
+
+        return () => unsubscribe();
+    }, [db, userId, loadingAuth]);
+
+
+    const generateAdvice = async () => {
+        if (!userId || !db || loadingAuth) {
+            setMessage('App is not ready. Please wait for authentication and database initialization.');
+            return;
+        }
+
+        if (!skillPreferences.trim()) {
+            setMessage('Please enter your skill preferences to get personalized advice.');
+            return;
+        }
+
+        setLoadingAdvice(true);
+        setMessage('');
+        setAdvice(''); // Clear current advice when generating new one
+        setSelectedHistoricalAdvice(null); // Clear selected history too
+
+        const appId = getAppId();
+        const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/profile/userProfile`);
+
+        try {
+            await updateDoc(userDocRef, { skillPreferences: skillPreferences });
+            setUserProfile(prev => ({ ...prev, skillPreferences: skillPreferences }));
+
+            // Prompt for both advice and a concise topic
+            // Modified prompt to explicitly focus only on the provided skills
+            const generationPrompt = `Generate personalized daily advice for a user interested in "${skillPreferences}". Focus *only* on actionable steps, learning resources, or practice tips relevant to this skill. Keep the advice concise, around 100-150 words. Also, provide a concise topic (2-5 words) that summarizes this advice, reflecting *only* the skill(s) provided.
+
+            Format your response as a JSON object with two fields: "advice" (string) and "topic" (string).
+
+            Example:
+            {
+              "topic": "Web Development Tips",
+              "advice": "To advance in web development, focus on mastering modern JavaScript frameworks like React or Vue. Spend dedicated time building small projects end-to-end to solidify your understanding. Explore server-side technologies like Node.js with Express to build full-stack applications. Regularly review code from open-source projects to learn best practices and efficient coding patterns. Consider contributing to a project on GitHub to gain practical experience and collaborate with others. Stay updated with the latest web standards and browser APIs to ensure your skills remain current."
+            }`;
+
+
+            let chatHistory = [];
+            chatHistory.push({ role: "user", parts: [{ text: generationPrompt }] });
+            const payload = {
+                contents: chatHistory,
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            "topic": { "type": "STRING" },
+                            "advice": { "type": "STRING" }
+                        },
+                        "propertyOrdering": ["topic", "advice"]
+                    }
+                }
+            };
+            const apiKey = "AIzaSyDk89dLS6pY-_7Ad8mQu_6Yt1xYOYdVcQM"; // New Gemini API Key
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                const parsedResult = JSON.parse(result.candidates[0].content.parts[0].text);
+                const generatedAdvice = parsedResult.advice;
+                const generatedTopic = parsedResult.topic;
+
+                setAdvice(generatedAdvice);
+
+                const adviceCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/dailyAdvice`);
+                await addDoc(adviceCollectionRef, {
+                    advice: generatedAdvice,
+                    topic: generatedTopic, // Store the AI-generated topic
+                    timestamp: serverTimestamp(),
+                    preferences: skillPreferences // Still store preferences for history
+                });
+
+                const today = new Date().toDateString();
+                const lastAdviceDate = userProfile?.lastAdviceDate instanceof Date ? userProfile.lastAdviceDate.toDateString() : (userProfile?.lastAdviceDate?.toDate ? userProfile.lastAdviceDate.toDate().toDateString() : null);
+
+                let newStreak = userProfile?.dailyStreak || 0;
+                let newPoints = (userProfile?.points || 0) + 10;
+
+                if (lastAdviceDate !== today) {
+                    const yesterday = new Date();
+                    yesterday.setDate(yesterday.getDate() - 1);
+                    const yesterdayString = yesterday.toDateString();
+
+                    if (lastAdviceDate === yesterdayString) {
+                        newStreak += 1;
+                    } else {
+                        newStreak = 1;
+                    }
+                    await updateDoc(userDocRef, {
+                        points: newPoints,
+                        dailyStreak: newStreak,
+                        lastAdviceDate: serverTimestamp()
+                    });
+                    setUserProfile(prev => ({
+                        ...prev,
+                        points: newPoints,
+                        dailyStreak: newStreak,
+                        lastAdviceDate: new Date()
+                    }));
+                } else {
+                     await updateDoc(userDocRef, { points: newPoints });
+                     setUserProfile(prev => ({ ...prev, points: newPoints }));
+                }
+
+            } else {
+                console.error("Gemini API response structure unexpected or empty candidates:", JSON.stringify(result, null, 2));
+                if (result.promptFeedback && result.promptFeedback.blockReason) {
+                    setMessage(`Failed to generate advice: Content blocked due to ${result.promptFeedback.blockReason}. Please try rephrasing.`);
+                } else if (result.error) {
+                    setMessage(`Failed to generate advice: API error - ${result.error.message}`);
+                } else {
+                    setMessage('Failed to generate advice. The AI did not return a valid response. Please try again.');
+                }
+            }
+        } catch (error) {
+            setMessage('Error generating advice: ' + error.message);
+            console.error("Error calling Gemini API or Firestore:", error);
+            if (error.response) { // For network errors with response
+                console.error("Error response data:", error.response.data);
+                console.error("Error response status:", error.response.status);
+            }
+        } finally {
+            setLoadingAdvice(false);
+        }
+    };
+
+    const clearCurrentAdvice = () => {
+        setAdvice('');
+        setSelectedHistoricalAdvice(null);
+        setMessage('Current advice cleared.');
+    };
+
+    return (
+        <div className="p-6 bg-gradient-to-br from-blue-50 to-green-50 rounded-lg shadow-lg w-full mx-auto my-8 animate-fade-in flex flex-col gap-6">
+            {/* Main Advice Generation Section */}
+            <div className="flex-grow bg-white bg-opacity-90 p-6 rounded-lg">
+                <h2 className="text-3xl font-bold text-gray-800 mb-6 text-center">Personalized Daily Advice</h2>
+                <div className="mb-6">
+                    <label htmlFor="skillPreferences" className="block text-gray-700 text-lg font-medium mb-2">
+                        What skills are you interested in? (e.g., Web Development, Data Science, Design)
+                    </label>
+                    <textarea
+                        id="skillPreferences"
+                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-800 text-base"
+                        rows="3"
+                        value={skillPreferences}
+                        onChange={(e) => setSkillPreferences(e.target.value)}
+                        placeholder="Tell me about your skill interests, or leave blank for general advice..."
+                    ></textarea>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3">
+                    <button
+                        onClick={generateAdvice}
+                        className="flex-grow bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed text-lg"
+                        disabled={loadingAdvice || loadingAuth || !skillPreferences.trim()}
+                    >
+                        {loadingAdvice ? 'Generating Advice...' : 'Get Personalized Advice'}
+                    </button>
+                    <button
+                        onClick={clearCurrentAdvice}
+                        className="flex-grow bg-gray-400 hover:bg-gray-500 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed text-lg"
+                        disabled={!advice && !selectedHistoricalAdvice}
+                    >
+                        Clear Current Advice
+                    </button>
+                </div>
+
+                {message && (
+                    <p className="mt-4 text-red-600 text-center font-medium">{message}</p>
+                )}
+                {(advice || selectedHistoricalAdvice) && (
+                    <div className="mt-8 p-6 bg-blue-50 border-l-4 border-blue-500 text-blue-800 rounded-lg shadow-inner animate-fade-in">
+                        <h3 className="text-xl font-semibold mb-3">
+                            {selectedHistoricalAdvice ? `Advice on: ${selectedHistoricalAdvice.topic || selectedHistoricalAdvice.preferences || 'General'}` : 'Your Daily Advice:'}
+                        </h3>
+                        <p className="text-lg leading-relaxed">
+                            {selectedHistoricalAdvice ? selectedHistoricalAdvice.advice : advice}
+                        </p>
+                        {selectedHistoricalAdvice && (
+                            <p className="text-sm text-blue-700 mt-3">
+                                Generated on: {selectedHistoricalAdvice.timestamp?.toDate ? selectedHistoricalAdvice.timestamp.toDate().toLocaleDateString() : 'Unknown date'}
+                            </p>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {/* Advice History now below main section and scrollable */}
+            <div className="w-full bg-white bg-opacity-90 p-4 rounded-lg shadow-inner mt-6">
+                <h3 className="text-xl font-bold text-gray-800 mb-4 text-center">Advice History</h3>
+                {Object.keys(adviceHistory).length === 0 ? (
+                    <p className="text-gray-500 italic text-center">No past advice recorded yet.</p>
+                ) : (
+                    <div className="space-y-4 max-h-40 overflow-y-auto custom-scrollbar">
+                        {Object.entries(adviceHistory).map(([topic, advices]) => (
+                            <div key={topic} className="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                                <h4 className="font-semibold text-gray-700 mb-2">{topic}</h4>
+                                <ul className="space-y-1">
+                                    {advices.map(adv => (
+                                        <li
+                                            key={adv.id}
+                                            className="text-sm text-blue-600 hover:text-blue-800 cursor-pointer p-1 rounded-md hover:bg-blue-100 transition-colors"
+                                            onClick={() => {
+                                                setSelectedHistoricalAdvice(adv);
+                                                setAdvice(''); // Clear current advice view
+                                                setMessage(''); // Clear any messages
+                                            }}
+                                        >
+                                            <span className="font-medium">
+                                                {adv.timestamp?.toDate ? adv.timestamp.toDate().toLocaleDateString() : 'Unknown date'}
+                                            </span>
+                                            <span className="ml-2 truncate block sm:inline-block max-w-full">
+                                                {adv.advice.substring(0, 50)}...
+                                            </span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+// 2. AI Chatbot
+const Chatbot = () => {
+    const { db, userId, loadingAuth, userProfile } = useAuth();
+    const [messages, setMessages] = useState([]);
+    const [input, setInput] = useState('');
+    const [loadingChat, setLoadingChat] = useState(false);
+    const chatContainerRef = useRef(null);
+    const [chatHistoryReady, setChatHistoryReady] = useState(false);
+    const recognitionRef = useRef(null); // Use useRef for mutable object not causing re-renders
+    const [isListening, setIsListening] = useState(false);
+    const synth = window.speechSynthesis;
+    const [selectedImage, setSelectedImage] = useState(null); // New state for image preview
+
+    useEffect(() => {
+        if (!db || !userId || loadingAuth) {
+            console.log("Chatbot: DB or userId not ready, or auth loading.");
+            return;
+        }
+
+        const appId = getAppId();
+        const chatCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/chatbotHistory`);
+        const q = query(chatCollectionRef, orderBy('timestamp'));
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const fetchedMessages = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setMessages(fetchedMessages);
+            setChatHistoryReady(true);
+        }, (error) => {
+            console.error("Error fetching chat history:", error);
+            setChatHistoryReady(true);
+        });
+
+        // Initialize SpeechRecognition
+        if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            const recognitionInstance = new SpeechRecognition();
+            recognitionInstance.continuous = false;
+            recognitionInstance.interimResults = false;
+            recognitionInstance.lang = 'en-US';
+
+            recognitionInstance.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                setInput(transcript);
+                setIsListening(false);
+            };
+
+            recognitionInstance.onerror = (event) => {
+                console.error("Speech recognition error:", event.error);
+                setIsListening(false);
+            };
+
+            recognitionInstance.onend = () => {
+                setIsListening(false);
+            };
+
+            recognitionRef.current = recognitionInstance; // Assign to ref
+        } else {
+            console.warn("Speech Recognition API not supported in this browser.");
+            recognitionRef.current = null; // Explicitly set to null if not supported
+        }
+
+
+        return () => {
+            unsubscribe();
+            // Safely stop recognition if it exists
+            if (recognitionRef.current) {
+                recognitionRef.current.stop();
+            }
+        };
+    }, [db, userId, loadingAuth]); // Removed 'recognition' from dependencies as it's a ref
+
+    useEffect(() => {
+        if (chatContainerRef.current) {
+            chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+    }, [messages]);
+
+    // Handle image file selection and convert to Base64
+    const handleImageChange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                setSelectedImage(reader.result); // Base64 string
+            };
+            reader.onerror = (error) => {
+                console.error("Error reading file:", error);
+                setSelectedImage(null);
+            };
+            reader.readAsDataURL(file);
+        } else {
+            setSelectedImage(null);
+        }
+    };
+
+    const clearImage = () => {
+        setSelectedImage(null);
+        document.getElementById('chatImageUpload').value = ''; // Clear file input
+    };
+
+
+    const sendMessage = async () => {
+        if ((!input.trim() && !selectedImage) || loadingChat || !userId || !db || loadingAuth || !userProfile) {
+            console.log("Chatbot: Cannot send message. Input invalid, loading, or app not ready.");
+            return;
+        }
+
+        const userName = userProfile.name || `User_${userId.substring(0, 0)}`; // Get username
+        const userMessage = {
+            text: input,
+            sender: 'user',
+            timestamp: serverTimestamp(),
+            userName: userName,
+            imageUrl: selectedImage // Include image URL if available
+        };
+        setMessages(prev => [...prev, userMessage]);
+        setInput('');
+        setSelectedImage(null); // Clear selected image after sending
+        document.getElementById('chatImageUpload').value = ''; // Clear file input
+        setLoadingChat(true);
+
+        const appId = getAppId();
+        const chatCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/chatbotHistory`);
+
+        try {
+            await addDoc(chatCollectionRef, userMessage);
+
+            const chatHistoryForGemini = messages.map(msg => ({
+                role: msg.sender === 'user' ? 'user' : 'model',
+                parts: [{ text: msg.text }]
+            }));
+            chatHistoryForGemini.push({ role: 'user', parts: [{ text: input }] });
+
+            const payload = { contents: chatHistoryForGemini };
+            const apiKey = "AIzaSyDk89dLS6pY-_7Ad8mQu_6Yt1xYOYdVcQM"; // New Gemini API Key
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+
+            let botMessageText = 'Sorry, I could not generate a response.';
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                botMessageText = result.candidates[0].content.parts[0].text;
+            } else if (result.promptFeedback && result.promptFeedback.blockReason) {
+                botMessageText = `Response blocked due to: ${result.promptFeedback.blockReason}. Please try rephrasing your query.`;
+            } else if (result.error) {
+                botMessageText = `Error from API: ${result.error.message}`;
+                console.error("Gemini API Error:", result.error);
+            }
+
+            const botMessage = { text: botMessageText, sender: 'bot', timestamp: serverTimestamp() };
+            setMessages(prev => [...prev, botMessage]);
+
+            await addDoc(chatCollectionRef, botMessage);
+
+        } catch (error) {
+            console.error("Error sending message to Gemini API or Firestore:", error);
+            setMessages(prev => [...prev, { text: `Error: ${error.message}`, sender: 'bot', timestamp: serverTimestamp() }]);
+        } finally {
+            setLoadingChat(false);
+        }
+    };
+
+    const startListening = () => {
+        if (recognitionRef.current && !isListening) {
+            recognitionRef.current.start();
+            setIsListening(true);
+            setInput('Listening...');
+        }
+    };
+
+    const stopListening = () => {
+        if (recognitionRef.current && isListening) {
+            recognitionRef.current.stop();
+            setIsListening(false);
+        }
+    };
+
+    const speakText = (text) => {
+        if (synth) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            synth.speak(utterance);
+        }
+    };
+
+    return (
+        <div className="p-6 bg-gradient-to-br from-pink-50 to-orange-50 rounded-lg shadow-lg max-w-2xl mx-auto my-8 animate-fade-in">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h2 className="text-3xl font-bold text-gray-800 mb-6 text-center">AI Chatbot</h2>
+                <div
+                    ref={chatContainerRef}
+                    className="bg-white p-4 rounded-lg border border-gray-200 h-96 overflow-y-auto flex flex-col space-y-4 mb-4 custom-scrollbar"
+                >
+                    {!chatHistoryReady && (
+                        <div className="text-center text-gray-500 py-4">Loading chat history...</div>
+                    )}
+                    {chatHistoryReady && messages.length === 0 && (
+                        <div className="text-center text-gray-500 py-4">Start a conversation with the AI!</div>
+                    )}
+                    {messages.map((msg, index) => (
+                        <div key={msg.id || index} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div
+                                className={`p-3 rounded-lg max-w-[70%] break-words relative group ${
+                                    msg.sender === 'user'
+                                        ? 'bg-blue-500 text-white rounded-br-none'
+                                        : 'bg-gray-200 text-gray-800 rounded-bl-none'
+                                }`}
+                            >
+                                <p className="text-sm">{msg.text}</p>
+                                {msg.imageUrl && (
+                                    <img src={msg.imageUrl} alt="Chat attachment" className="mt-2 rounded-md max-w-full h-auto" />
+                                )}
+                                <span className="text-xs opacity-75 mt-1 block">
+                                    {msg.timestamp?.toDate ? msg.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...'}
+                                </span>
+                                {msg.sender === 'bot' && synth && (
+                                    <button
+                                        onClick={() => speakText(msg.text)}
+                                        className="absolute -right-8 top-1/2 -translate-y-1/2 p-1 text-gray-600 hover:text-blue-600 transition-colors opacity-0 group-hover:opacity-100"
+                                        title="Listen to response"
+                                    >
+                                        <i className="fas fa-volume-up"></i>
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                    {loadingChat && (
+                        <div className="flex justify-start">
+                            <div className="p-3 rounded-lg bg-gray-200 text-gray-800 rounded-bl-none animate-pulse">
+                                <p className="text-sm">AI is thinking...</p>
+                            </div>
+                        </div>
+                    )}
+                </div>
+                {selectedImage && (
+                    <div className="mb-4 p-3 bg-blue-100 rounded-lg flex items-center justify-between shadow-inner">
+                        <img src={selectedImage} alt="Preview" className="h-16 w-16 object-cover rounded-md mr-3" />
+                        <span className="text-sm text-gray-700 truncate">Image selected</span>
+                        <button onClick={clearImage} className="ml-3 text-red-500 hover:text-red-700">
+                            <i className="fas fa-times-circle"></i>
+                        </button>
+                    </div>
+                )}
+                <div className="flex items-center gap-2">
+                    <label htmlFor="chatImageUpload" className="p-3 bg-gray-400 hover:bg-gray-500 text-white rounded-lg cursor-pointer transition duration-300 ease-in-out flex-shrink-0" title="Upload Image">
+                        <i className="fas fa-image"></i>
+                        <input
+                            type="file"
+                            id="chatImageUpload"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={handleImageChange}
+                            disabled={loadingChat || loadingAuth || !chatHistoryReady}
+                        />
+                    </label>
+                    {recognitionRef.current && ( // Only show button if API is supported
+                        <button
+                            onClick={isListening ? stopListening : startListening}
+                            className={`p-3 ${isListening ? 'bg-red-500 hover:bg-red-600' : 'bg-gray-400 hover:bg-gray-500'} text-white rounded-lg font-semibold transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0`}
+                            disabled={loadingChat || loadingAuth || !chatHistoryReady}
+                            title={isListening ? "Stop Listening" : "Start Listening"}
+                        >
+                            <i className={`fas ${isListening ? 'fa-microphone-slash' : 'fa-microphone'}`}></i>
+                        </button>
+                    )}
+                    <input
+                        type="text"
+                        className="flex-grow p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
+                        placeholder="Type your message..."
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyPress={(e) => {
+                            if (e.key === 'Enter') sendMessage();
+                        }}
+                        disabled={loadingChat || loadingAuth || !chatHistoryReady}
+                    />
+                    <button
+                        onClick={sendMessage}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                        disabled={loadingChat || loadingAuth || (!input.trim() && !selectedImage) || !chatHistoryReady}
+                    >
+                        <i className="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// 3. Gamification Dashboard
+const GamificationDashboard = () => {
+    const { userProfile, loadingAuth } = useAuth();
+
+    if (loadingAuth) {
+        return (
+            <div className="p-6 bg-white rounded-lg shadow-lg max-w-2xl mx-auto my-8 text-center text-gray-600">
+                Loading gamification data...
+            </div>
+        );
+    }
+
+    if (!userProfile) {
+        return (
+            <div className="p-6 bg-white rounded-lg shadow-lg max-w-2xl mx-auto my-8 text-center text-red-600">
+                Could not load user profile for gamification.
+            </div>
+        );
+    }
+
+    const { points, dailyStreak, lastAdviceDate } = userProfile;
+
+    const formattedLastAdviceDate = lastAdviceDate?.toDate ? lastAdviceDate.toDate().toLocaleDateString() : 'Never';
+
+    return (
+        <div className="p-6 bg-gradient-to-br from-purple-50 to-indigo-50 rounded-lg shadow-xl max-w-2xl mx-auto my-8 animate-fade-in">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h2 className="text-3xl font-bold mb-6 text-center text-gray-800">Your Progress Dashboard</h2>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-center">
+                    <div className="bg-white bg-opacity-80 p-4 rounded-lg shadow-md backdrop-blur-sm flex flex-col items-center justify-center transform transition-transform duration-300 hover:scale-105">
+                        <i className="fas fa-star text-4xl mb-2 text-yellow-300"></i>
+                        <p className="text-xl font-semibold text-gray-800">Points</p>
+                        <p className="text-3xl font-extrabold text-gray-800">{points || 0}</p>
+                    </div>
+                    <div className="bg-white bg-opacity-80 p-4 rounded-lg shadow-md backdrop-blur-sm flex flex-col items-center justify-center transform transition-transform duration-300 hover:scale-105">
+                        <i className="fas fa-fire-alt text-4xl mb-2 text-red-400"></i>
+                        <p className="text-xl font-semibold text-gray-800">Daily Streak</p>
+                        <p className="text-3xl font-extrabold text-gray-800">{dailyStreak || 0} Days</p>
+                    </div>
+                    <div className="bg-white bg-opacity-80 p-4 rounded-lg shadow-md backdrop-blur-sm flex flex-col items-center justify-center transform transition-transform duration-300 hover:scale-105">
+                        <i className="fas fa-calendar-alt text-4xl mb-2 text-blue-300"></i>
+                        <p className="text-xl font-semibold text-gray-800">Last Advice</p>
+                        <p className="text-xl font-extrabold text-gray-800">{formattedLastAdviceDate}</p>
+                    </div>
+                </div>
+                <p className="mt-6 text-lg text-center opacity-90 text-gray-700">
+                    Keep learning! Earn points for daily advice and completing tasks. Maintain your streak!
+                </p>
+            </div>
+        </div>
+    );
+};
+
+// 4. Skill Library and Tracking
+const SkillLibrary = () => {
+    const { db, userId, loadingAuth, userProfile, setUserProfile } = useAuth();
+    const [skillInput, setSkillInput] = useState('');
+    const [suggestedBooks, setSuggestedBooks] = useState([]);
+    const [loadingBooks, setLoadingBooks] = useState(false);
+    const [message, setMessage] = useState('');
+
+    // State for "Skills I Want to Track" (notepad)
+    const [skillToTrackInput, setSkillToTrackInput] = useState('');
+    const skillsToTrack = userProfile?.skillsToTrack || [];
+
+    // State for "Special Notes"
+    const [specialNoteInput, setSpecialNoteInput] = useState('');
+    const specialNotes = userProfile?.specialNotes || [];
+
+    const getSuggestedBooks = async () => {
+        if (!userId || !db || loadingAuth) {
+            setMessage('App is not ready. Please wait for authentication.');
+            return;
+        }
+        if (!skillInput.trim()) {
+            setMessage('Please enter a skill to get book suggestions.');
+            return;
+        }
+
+        setLoadingBooks(true);
+        setMessage('');
+        setSuggestedBooks([]);
+
+        try {
+            // Updated prompt to only ask for book name and author
+            const prompt = `Suggest 5 highly-rated books for learning "${skillInput}". For each book, provide only the title and author, formatted as "Title by Author" on a new line. Do NOT include links.`;
+            let chatHistory = [];
+            chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+            const payload = { contents: chatHistory };
+            const apiKey = "AIzaSyDk89dLS6pY-_7Ad8mQu_6Yt1xYOYdVcQM"; // New Gemini API Key
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                const text = result.candidates[0].content.parts[0].text;
+                // Parse lines assuming "Title by Author" format
+                const books = text.split('\n').filter(line => line.trim().length > 0).map(line => ({ text: line.trim() }));
+                setSuggestedBooks(books);
+
+                // Store the book suggestions in Firestore
+                const appId = getAppId();
+                const bookSuggestionsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/userBookSuggestions`);
+                await addDoc(bookSuggestionsCollectionRef, {
+                    skill: skillInput.trim(),
+                    books: books.map(b => b.text), // Store just text, no links
+                    timestamp: serverTimestamp()
+                });
+
+            } else {
+                setMessage('Failed to get book suggestions. Please try again.');
+                console.error("Gemini API response structure unexpected:", result);
+            }
+        } catch (error) {
+            setMessage('Error getting book suggestions: ' + error.message);
+            console.error("Error calling Gemini API or Firestore:", error);
+        } finally {
+            setLoadingBooks(false);
+        }
+    };
+
+    // Functions for "Skills I Want to Track" (Notepad)
+    const addSkillToTrack = async () => {
+        if (!skillToTrackInput.trim() || !userId || !db || loadingAuth) {
+            setMessage('Please enter a skill to track.');
+            return;
+        }
+        setMessage('');
+
+        const appId = getAppId();
+        const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/profile/userProfile`);
+        const newSkill = skillToTrackInput.trim();
+
+        if (skillsToTrack.includes(newSkill)) {
+            setMessage(`"${newSkill}" is already in your skills to track.`);
+            return;
+        }
+
+        try {
+            await updateDoc(userDocRef, {
+                skillsToTrack: arrayUnion(newSkill)
+            });
+            setUserProfile(prev => ({
+                ...prev,
+                skillsToTrack: [...(prev?.skillsToTrack || []), newSkill]
+            }));
+            setSkillToTrackInput('');
+            setMessage(`"${newSkill}" added to skills to track.`);
+        } catch (error) {
+            setMessage(`Error adding skill to track: ${error.message}`);
+            console.error("Error adding skill to track in Firestore:", error);
+        }
+    };
+
+    const removeSkillToTrack = async (skillToRemove) => {
+        if (!userId || !db || loadingAuth) {
+            setMessage('App is not ready. Please wait.');
+            return;
+        }
+        setMessage('');
+
+        const appId = getAppId();
+        const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/profile/userProfile`);
+        const updatedSkills = skillsToTrack.filter(skill => skill !== skillToRemove);
+
+        try {
+            await updateDoc(userDocRef, {
+                skillsToTrack: updatedSkills
+            });
+            setUserProfile(prev => ({
+                ...prev,
+                skillsToTrack: updatedSkills
+            }));
+            setMessage('Note removed successfully!');
+        } catch (error) {
+            setMessage(`Error removing note: ${error.message}`);
+            console.error("Error removing note from Firestore:", error);
+        }
+    };
+
+    // Functions for "Special Notes"
+    const addSpecialNote = async () => {
+        if (!specialNoteInput.trim() || !userId || !db || loadingAuth) {
+            setMessage('Please enter a note.');
+            return;
+        }
+        setMessage('');
+
+        const appId = getAppId();
+        const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/profile/userProfile`);
+        const newNote = specialNoteInput.trim();
+
+        try {
+            await updateDoc(userDocRef, {
+                specialNotes: arrayUnion(newNote)
+            });
+            setUserProfile(prev => ({
+                ...prev,
+                specialNotes: [...(prev?.specialNotes || []), newNote]
+            }));
+            setSpecialNoteInput('');
+            setMessage('Note added successfully!');
+        } catch (error) {
+            setMessage(`Error adding note: ${error.message}`);
+            console.error("Error adding note to Firestore:", error);
+        }
+    };
+
+    const removeSpecialNote = async (noteToRemove) => {
+        if (!userId || !db || loadingAuth) {
+            setMessage('App is not ready. Please wait.');
+            return;
+        }
+        setMessage('');
+
+        const appId = getAppId();
+        const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/profile/userProfile`);
+        const updatedNotes = specialNotes.filter(note => note !== noteToRemove);
+
+        try {
+            await updateDoc(userDocRef, {
+                specialNotes: updatedNotes
+            });
+            setUserProfile(prev => ({
+                ...prev,
+                specialNotes: updatedNotes
+            }));
+            setMessage('Note removed successfully!');
+        } catch (error) {
+            setMessage(`Error removing note: ${error.message}`);
+            console.error("Error removing note from Firestore:", error);
+        }
+    };
+
+
+    return (
+        <div className="p-6 bg-gradient-to-br from-green-50 to-blue-50 rounded-lg shadow-lg max-w-4xl mx-auto my-8 animate-fade-in">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h2 className="text-3xl font-bold text-gray-800 mb-6 text-center">Skill Library & Notes</h2>
+
+                <div className="mb-8">
+                    <label htmlFor="skillSearch" className="block text-gray-700 text-lg font-medium mb-2">
+                        Enter a Skill to Get Book Suggestions:
+                    </label>
+                    <div className="flex flex-col sm:flex-row gap-3 mb-4">
+                        <input
+                            type="text"
+                            id="skillSearch"
+                            className="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-800"
+                            placeholder="e.g., JavaScript, Marketing, History"
+                            value={skillInput}
+                            onChange={(e) => setSkillInput(e.target.value)}
+                            onKeyPress={(e) => {
+                                if (e.key === 'Enter') getSuggestedBooks();
+                            }}
+                            disabled={loadingAuth || loadingBooks}
+                        />
+                        <button
+                            onClick={getSuggestedBooks}
+                            className="bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 transform hover:scale-105"
+                            disabled={loadingBooks || loadingAuth || !skillInput.trim()}
+                        >
+                            {loadingBooks ? 'Getting Books...' : 'Get Book Suggestions'}
+                        </button>
+                    </div>
+                    {message && <p className="mt-2 text-red-600 text-center font-medium">{message}</p>}
+
+                    {suggestedBooks.length > 0 && (
+                        <div className="mt-4 p-4 bg-green-50 border-l-4 border-green-500 text-green-800 rounded-lg animate-fade-in">
+                            <h3 className="text-lg font-semibold mb-2">Suggested Books:</h3>
+                            <ul className="list-disc list-inside space-y-1">
+                                {suggestedBooks.map((book, index) => (
+                                    <li key={index} className="text-sm">
+                                        <span>{book.text}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    {/* Skills I Want to Track (Notepad) */}
+                    <div className="bg-blue-50 p-6 rounded-lg shadow-md border border-blue-200 transform transition-transform duration-300 hover:scale-[1.01]">
+                        <h3 className="text-2xl font-bold text-gray-700 mb-4 flex items-center">
+                            <i className="fas fa-clipboard-list mr-3 text-blue-600"></i>Skills I Want to Track
+                        </h3>
+                        <div className="min-h-[100px]">
+                            <div className="flex gap-2 mb-4">
+                                <input
+                                    type="text"
+                                    className="flex-grow p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                                    placeholder="Add skill to track..."
+                                    value={skillToTrackInput}
+                                    onChange={(e) => setSkillToTrackInput(e.target.value)}
+                                    onKeyPress={(e) => {
+                                        if (e.key === 'Enter') addSkillToTrack();
+                                    }}
+                                    disabled={loadingAuth}
+                                />
+                                <button
+                                    onClick={addSkillToTrack}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                    disabled={loadingAuth || !skillToTrackInput.trim()}
+                                >
+                                    Add
+                                </button>
+                            </div>
+                            {skillsToTrack.length === 0 ? (
+                                <p className="text-gray-500 italic">No skills added yet. Use the input above to add skills you want to track.</p>
+                            ) : (
+                                <ul className="space-y-2">
+                                    {skillsToTrack.map((skill, index) => (
+                                        <li key={index} className="flex justify-between items-center bg-white p-2 rounded-md shadow-sm text-gray-800 text-base transform transition-transform duration-200 hover:scale-[1.02]">
+                                            <span>{skill}</span>
+                                            <button
+                                                onClick={() => removeSkillToTrack(skill)}
+                                                className="text-red-500 hover:text-red-700 ml-2"
+                                                title={`Remove "${skill}"`}
+                                            >
+                                                <i className="fas fa-times-circle"></i>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Special Notes */}
+                    <div className="bg-purple-50 p-6 rounded-lg shadow-md border border-purple-200 transform transition-transform duration-300 hover:scale-[1.01]">
+                        <h3 className="text-2xl font-bold text-gray-700 mb-4 flex items-center">
+                            <i className="fas fa-pencil-alt mr-3 text-purple-600"></i>Special Notes
+                        </h3>
+                        <div className="min-h-[100px]">
+                            <div className="flex gap-2 mb-4">
+                                <textarea
+                                    className="flex-grow p-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500"
+                                    placeholder="Write down notes from books or resources..."
+                                    rows="3"
+                                    value={specialNoteInput}
+                                    onChange={(e) => setSpecialNoteInput(e.target.value)}
+                                    disabled={loadingAuth}
+                                ></textarea>
+                                <button
+                                    onClick={addSpecialNote}
+                                    className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm self-start disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                    disabled={loadingAuth || !specialNoteInput.trim()}
+                                >
+                                    Add Note
+                                </button>
+                            </div>
+                            {specialNotes.length === 0 ? (
+                                <p className="text-gray-500 italic">No special notes yet. Use the input above to jot down important points.</p>
+                            ) : (
+                                <ul className="space-y-2">
+                                    {specialNotes.map((note, index) => (
+                                        <li key={index} className="flex justify-between items-start bg-white p-2 rounded-md shadow-sm text-gray-800 text-base transform transition-transform duration-200 hover:scale-[1.02]">
+                                            <span className="flex-grow">{note}</span>
+                                            <button
+                                                onClick={() => removeSpecialNote(note)}
+                                                className="text-red-500 hover:text-red-700 ml-2 flex-shrink-0"
+                                                title="Remove note"
+                                            >
+                                                <i className="fas fa-times-circle"></i>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// 5. Personalized AI Learning Path & Assessment (Simulated)
+const PersonalizationAI = () => {
+    const { userId, db, loadingAuth } = useAuth();
+    const [assessmentResult, setAssessmentResult] = useState('');
+    const [learningResources, setLearningResources] = useState('');
+    const [loadingAssessment, setLoadingAssessment] = useState(false);
+    const [loadingResources, setLoadingResources] = useState(false);
+    const [message, setMessage] = useState('');
+
+    // Quiz specific states
+    const [assessmentSkillArea, setAssessmentSkillArea] = useState(''); // User types skill for quiz/assessment
+    const [quizQuestions, setQuizQuestions] = useState([]);
+    const [userAnswers, setUserAnswers] = useState({});
+    const [quizScore, setQuizScore] = useState(null);
+    const [showQuiz, setShowQuiz] = useState(false); // To show/hide quiz generation area
+    const [loadingQuiz, setLoadingQuiz] = useState(false);
+    const [quizMessage, setQuizMessage] = useState('');
+
+
+    // Function to generate assessment based on quiz results
+    const generateAssessment = async () => {
+        if (!userId || !db || loadingAuth) {
+            setMessage('App is not ready. Please wait for authentication.');
+            return;
+        }
+        if (quizScore === null) {
+            setMessage('Please complete the quiz first to get an assessment.');
+            return;
+        }
+
+        setLoadingAssessment(true);
+        setMessage('');
+        setAssessmentResult('');
+
+        try {
+            const prompt = `Based on a quiz about "${assessmentSkillArea}" where the user scored ${quizScore} out of ${quizQuestions.length}, provide a detailed assessment of their knowledge. Suggest specific areas for improvement and actionable steps based on this performance. Be encouraging but honest.`;
+            const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+            const apiKey = "AIzaSyDk89dLS6pY-_7Ad8mQu_6Yt1xYOYdVcQM"; // New Gemini API Key
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                const text = result.candidates[0].content.parts[0].text;
+                setAssessmentResult(text);
+
+                const appId = getAppId();
+                const assessmentsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/assessments`);
+                await addDoc(assessmentsCollectionRef, {
+                    topic: assessmentSkillArea,
+                    quizScore: quizScore,
+                    totalQuestions: quizQuestions.length,
+                    assessmentResult: text,
+                    timestamp: serverTimestamp(),
+                });
+            } else {
+                setMessage('Failed to generate assessment. Please try again.');
+                console.error("Gemini API response structure unexpected:", result);
+            }
+        } catch (error) {
+            setMessage('Error generating assessment: ' + error.message);
+            console.error("Error calling Gemini API or Firestore:", error);
+        } finally {
+            setLoadingAssessment(false);
+        }
+    };
+
+    // Function to get learning resources based on quiz topic
+    const getLearningResources = async () => {
+        if (!userId || !db || loadingAuth) {
+            setMessage('App is not ready. Please wait for authentication.');
+            return;
+        }
+        if (!assessmentSkillArea.trim() || loadingResources) {
+            setMessage('Please generate and complete a quiz first, or enter a skill area for resources.');
+            return;
+        }
+
+        setLoadingResources(true);
+        setMessage('');
+        setLearningResources('');
+
+        try {
+            const prompt = `Provide top 5 learning resources (e.g., courses, books, websites, tutorials) for "${assessmentSkillArea}". Format them clearly with names and types.`;
+            const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+            const apiKey = "AIzaSyDk89dLS6pY-_7Ad8mQu_6Yt1xYOYdVcQM"; // New Gemini API Key
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                const text = result.candidates[0].content.parts[0].text;
+                setLearningResources(text);
+            } else {
+                setMessage('Failed to get learning resources. Please try again.');
+                console.error("Gemini API response structure unexpected:", result);
+            }
+        } catch (error) {
+            setMessage('Error getting learning resources: ' + error.message);
+            console.error("Error calling Gemini API:", error);
+        } finally {
+            setLoadingResources(false);
+        }
+    };
+
+    // Quiz Functions
+    const generateQuiz = async () => {
+        if (!userId || !db || loadingAuth) {
+            setQuizMessage('App is not ready. Please wait for authentication.');
+            return;
+        }
+        if (!assessmentSkillArea.trim()) {
+            setQuizMessage('Please enter a skill area for the quiz.');
+            return;
+        }
+
+        setLoadingQuiz(true);
+        setQuizMessage('');
+        setQuizQuestions([]);
+        setUserAnswers({});
+        setQuizScore(null);
+        setShowQuiz(true); // Show quiz area once generation starts
+        setAssessmentResult(''); // Clear previous assessment/resources
+        setLearningResources('');
+
+
+        try {
+            const prompt = `Generate a 5-question multiple-choice quiz about "${assessmentSkillArea}". For each question, provide:
+1. The question text.
+2. Four options (A, B, C, D).
+3. The correct answer (A, B, C, or D).
+Format each question block as follows:
+Q: [Question Text]
+A) [Option A]
+B) [Option B]
+C) [Option C]
+D) [Option D]
+Correct: [Correct Option Letter]
+---
+Example:
+Q: What is the capital of France?
+A) Berlin
+B) London
+C) Paris
+D) Rome
+Correct: C
+---`;
+            const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+            const apiKey = "AIzaSyDk89dLS6pY-_7Ad8mQu_6Yt1xYOYdVcQM"; // New Gemini API Key
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                const text = result.candidates[0].content.parts[0].text;
+                const parsedQuestions = parseQuizResponse(text);
+                if (parsedQuestions.length > 0) {
+                    setQuizQuestions(parsedQuestions);
+                    setQuizMessage(`Quiz on "${assessmentSkillArea}" generated successfully!`);
+                } else {
+                    setQuizMessage('Could not parse quiz questions. Please try a different topic or re-generate.');
+                    setShowQuiz(false);
+                }
+            } else {
+                setQuizMessage('Failed to generate quiz. Please try again.');
+                console.error("Gemini API response structure unexpected:", result);
+                setShowQuiz(false);
+            }
+        } catch (error) {
+            setQuizMessage('Error generating quiz: ' + error.message);
+            console.error("Error calling Gemini API:", error);
+            setShowQuiz(false);
+        } finally {
+            setLoadingQuiz(false);
+        }
+    };
+
+    const parseQuizResponse = (rawText) => {
+        const questions = [];
+        const questionBlocks = rawText.split('---').filter(block => block.trim().length > 0);
+
+        questionBlocks.forEach(block => {
+            const lines = block.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+            let questionText = '';
+            const options = [];
+            let correctAnswer = '';
+
+            lines.forEach(line => {
+                if (line.startsWith('Q:')) {
+                    questionText = line.substring(2).trim();
+                } else if (line.match(/^[A-D]\)/)) {
+                    options.push(line.trim());
+                } else if (line.startsWith('Correct:')) {
+                    correctAnswer = line.substring(8).trim();
+                }
+            });
+
+            if (questionText && options.length === 4 && correctAnswer) {
+                questions.push({
+                    question: questionText,
+                    options: options,
+                    correct: correctAnswer
+                });
+            }
+        });
+        return questions;
+    };
+
+
+    const handleQuizAnswerChange = (questionIndex, answer) => {
+        setUserAnswers(prev => ({
+            ...prev,
+            [questionIndex]: answer
+        }));
+    };
+
+    const submitQuiz = async () => {
+        if (!userId || !db || loadingAuth) {
+            setQuizMessage('App is not ready. Please wait for authentication.');
+            return;
+        }
+
+        let score = 0;
+        quizQuestions.forEach((q, index) => {
+            if (userAnswers[index] === q.correct) {
+                score++;
+            }
+        });
+        setQuizScore(score);
+        setQuizMessage(`You scored ${score} out of ${quizQuestions.length}!`);
+
+        const appId = getAppId();
+        const quizzesCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/quizzes`);
+        try {
+            await addDoc(quizzesCollectionRef, {
+                topic: assessmentSkillArea,
+                questions: quizQuestions,
+                userAnswers: userAnswers,
+                score: score,
+                totalQuestions: quizQuestions.length,
+                timestamp: serverTimestamp()
+            });
+        } catch (error) {
+            console.error("Error saving quiz results to Firestore:", error);
+            setQuizMessage('Quiz results saved successfully, but there was an error saving to history.');
+        }
+    };
+
+    return (
+        <div className="p-6 bg-gradient-to-br from-yellow-50 to-red-50 rounded-lg shadow-lg max-w-4xl mx-auto my-8 animate-fade-in">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h2 className="text-3xl font-bold text-gray-800 mb-6 text-center">AI Learning Path & Assessment</h2>
+
+                {/* Quiz Section - now integrated as primary input */}
+                <div className="mt-4 p-6 bg-blue-50 rounded-lg shadow-lg border border-blue-200 transform transition-transform duration-300 hover:scale-[1.01]">
+                    <h3 className="text-xl font-semibold mb-4 text-gray-700">Test Your Knowledge with a Quiz!</h3>
+                    <div className="mb-4">
+                        <label htmlFor="assessmentSkillArea" className="block text-gray-700 text-base font-medium mb-2">
+                            Enter a skill area for your quiz and assessment:
+                        </label>
+                        <input
+                            type="text"
+                            id="assessmentSkillArea"
+                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-1 focus:ring-blue-500 text-gray-800"
+                            value={assessmentSkillArea}
+                            onChange={(e) => setAssessmentSkillArea(e.target.value)}
+                            placeholder="e.g., 'React Hooks' or 'Calculus Basics'"
+                            disabled={loadingQuiz || loadingAuth}
+                        />
+                    </div>
+                    <button
+                        onClick={generateQuiz}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                        disabled={loadingQuiz || loadingAuth || !assessmentSkillArea.trim()}
+                    >
+                            {loadingQuiz ? 'Generating Quiz...' : 'Generate New Quiz'}
+                    </button>
+                    {quizMessage && (
+                        <p className="mt-4 text-red-600 text-center font-medium">{quizMessage}</p>
+                    )}
+
+                    {showQuiz && quizQuestions.length > 0 && (
+                        <div className="mt-6 p-4 bg-white rounded-lg shadow-inner animate-fade-in">
+                            <h4 className="text-lg font-semibold mb-4">Quiz on "{assessmentSkillArea}"</h4>
+                            <form onSubmit={(e) => { e.preventDefault(); submitQuiz(); }} className="space-y-4">
+                                {quizQuestions.map((q, qIndex) => (
+                                    <div key={qIndex} className="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                                        <p className="font-medium text-gray-800 mb-2">Q{qIndex + 1}: {q.question}</p>
+                                        <div className="flex flex-col space-y-1">
+                                            {q.options.map((option, oIndex) => (
+                                                <label key={oIndex} className="inline-flex items-center text-gray-700 cursor-pointer">
+                                                    <input
+                                                        type="radio"
+                                                        name={`question-${qIndex}`}
+                                                        value={option.charAt(0)} // Extract A, B, C, D
+                                                        checked={userAnswers[qIndex] === option.charAt(0)}
+                                                        onChange={() => handleQuizAnswerChange(qIndex, option.charAt(0))}
+                                                        className="form-radio h-4 w-4 text-blue-600"
+                                                    />
+                                                    <span className="ml-2">{option}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                        {quizScore !== null && ( // Show correct answer only after submission
+                                            <p className={`mt-2 text-sm font-semibold ${userAnswers[qIndex] === q.correct ? 'text-green-600' : 'text-red-600'}`}>
+                                                Correct Answer: {q.correct}
+                                            </p>
+                                        )}
+                                    </div>
+                                ))}
+                                <button
+                                    type="submit"
+                                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed mt-4 transform hover:scale-105"
+                                    disabled={loadingAuth || Object.keys(userAnswers).length !== quizQuestions.length || quizScore !== null}
+                                >
+                                    Submit Quiz
+                                </button>
+                            </form>
+                            {quizScore !== null && (
+                                <div className="mt-6 p-4 text-center bg-blue-100 border-l-4 border-blue-500 text-blue-800 rounded-lg">
+                                    <h4 className="text-xl font-bold">Your Score: {quizScore} / {quizQuestions.length}</h4>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
+                    {/* Assessment Section - now depends on quiz completion */}
+                    <div className="bg-white p-4 rounded-lg shadow-md border border-gray-200 transform transition-transform duration-300 hover:scale-[1.01]">
+                        <h3 className="text-xl font-semibold mb-4 text-gray-700">Knowledge Assessment</h3>
+                        <p className="text-gray-700 text-base mb-4">
+                            Get an assessment of your knowledge based on your recent quiz performance in "{assessmentSkillArea}".
+                        </p>
+                        <button
+                            onClick={generateAssessment}
+                            className="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                            disabled={loadingAssessment || loadingAuth || quizScore === null || !assessmentSkillArea.trim()}
+                        >
+                            {loadingAssessment ? 'Assessing...' : 'Get Assessment Based on Quiz'}
+                        </button>
+                        {assessmentResult && (
+                            <div className="mt-4 p-3 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-800 rounded-lg animate-fade-in">
+                                <h4 className="font-semibold mb-2">Assessment Result:</h4>
+                                <p className="text-sm leading-relaxed whitespace-pre-wrap">{assessmentResult}</p>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Learning Resources Section - now depends on quiz topic */}
+                    <div className="bg-white p-4 rounded-lg shadow-md border border-gray-200 transform transition-transform duration-300 hover:scale-[1.01]">
+                        <h3 className="text-xl font-semibold mb-4 text-gray-700">Learning Resources</h3>
+                        <p className="text-gray-700 text-base mb-4">
+                            Discover curated learning resources for "{assessmentSkillArea}".
+                        </p>
+                        <button
+                            onClick={getLearningResources}
+                            className="w-full bg-orange-600 hover:bg-orange-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                            disabled={loadingResources || loadingAuth || !assessmentSkillArea.trim()}
+                        >
+                            {loadingResources ? 'Finding Resources...' : 'Get Learning Resources for Skill'}
+                        </button>
+                        {learningResources && (
+                            <div className="mt-4 p-3 bg-orange-100 border-l-4 border-orange-500 text-orange-800 rounded-lg animate-fade-in">
+                                <h4 className="font-semibold mb-2">Suggested Resources:</h4>
+                                <p className="text-sm leading-relaxed whitespace-pre-wrap">{learningResources}</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+                {message && (
+                    <p className="mt-4 text-red-600 text-center font-medium">{message}</p>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
+// NEW: GroupChat Component
+const GroupChat = () => {
+    const { db, userId, loadingAuth, userProfile } = useAuth(); // Added userProfile
+    const [messages, setMessages] = useState([]);
+    const [input, setInput] = useState('');
+    const [loadingChat, setLoadingChat] = useState(true);
+    const chatContainerRef = useRef(null);
+    const [message, setMessage] = useState(''); // For user-facing messages
+    const [confirmClear, setConfirmClear] = useState(false); // State for confirmation message
+
+    const chatChannelId = 'general';
+    const appId = getAppId();
+    const chatCollectionRef = collection(db, `artifacts/${appId}/public/data/groupChats/${chatChannelId}/messages`);
+
+    useEffect(() => {
+        if (!db || !userId || loadingAuth) {
+            console.log("GroupChat: DB or userId not ready, or auth loading.");
+            return;
+        }
+
+        const q = query(chatCollectionRef, orderBy('timestamp'), limit(50));
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const fetchedMessages = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setMessages(fetchedMessages);
+            setLoadingChat(false);
+        }, (error) => {
+            console.error("Error fetching group chat messages:", error);
+            setMessage('Failed to load group chat messages.');
+            setLoadingChat(false);
+        });
+
+        return () => unsubscribe();
+    }, [db, userId, loadingAuth]);
+
+    useEffect(() => {
+        if (chatContainerRef.current) {
+            chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+    }, [messages]);
+
+    const sendMessage = async () => {
+        if (!input.trim() || !userId || loadingAuth || loadingChat || !userProfile) {
+            console.log("GroupChat: Cannot send message. Input invalid, loading, or app not ready.");
+            return;
+        }
+
+        const userName = userProfile.name || `User_${userId.substring(0, 8)}`; // Get username from profile
+        setMessage(''); // Clear previous messages
+        
+        try {
+            await addDoc(chatCollectionRef, {
+                text: input.trim(),
+                userId: userId,
+                userName: userName, // Store username with message
+                timestamp: serverTimestamp(),
+            });
+            setInput('');
+        } catch (error) {
+            setMessage('Error sending message: ' + error.message);
+            console.error("Error sending group chat message:", error);
+        }
+    };
+
+    const handleClearChat = async () => {
+        if (!db || !userId || loadingAuth) {
+            setMessage('App is not ready. Please wait for authentication.');
+            return;
+        }
+
+        setMessage(''); // Clear previous messages
+        setConfirmClear(true); // Show confirmation prompt
+    };
+
+    const confirmClearMessages = async () => {
+        setConfirmClear(false); // Hide confirmation
+        setMessage('Clearing chat...');
+
+        try {
+            const snapshot = await getDocs(chatCollectionRef);
+            if (snapshot.empty) {
+                setMessage('Chat is already empty.');
+                return;
+            }
+
+            const batch = writeBatch(db);
+            snapshot.docs.forEach((doc) => {
+                batch.delete(doc.ref);
+            });
+            await batch.commit();
+            setMessage('Chat cleared successfully!');
+        } catch (error) {
+            setMessage('Error clearing chat: ' + error.message);
+            console.error("Error clearing chat messages:", error);
+        }
+    };
+
+    const cancelClearMessages = () => {
+        setConfirmClear(false);
+        setMessage('');
+    };
+
+    return (
+        <div className="mt-8 p-6 bg-gradient-to-br from-teal-50 to-cyan-50 rounded-lg shadow-lg max-w-4xl mx-auto animate-fade-in">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h3 className="text-2xl font-bold text-gray-800 mb-4 text-center">General Group Chat</h3>
+                {message && <p className="text-red-600 text-center mb-4">{message}</p>}
+
+                {confirmClear && (
+                    <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-xl text-center transform transition-transform duration-300 animate-bounce-in-fade-out">
+                            <p className="mb-4 text-lg font-semibold">Are you sure you want to clear all chat messages?</p>
+                            <div className="flex justify-center space-x-4">
+                                <button
+                                    onClick={confirmClearMessages}
+                                    className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transform hover:scale-105 transition-transform duration-200"
+                                >
+                                    Yes, Clear
+                                </button>
+                                <button
+                                    onClick={cancelClearMessages}
+                                    className="bg-gray-300 hover:bg-gray-400 text-gray-800 font-semibold py-2 px-4 rounded-lg transform hover:scale-105 transition-transform duration-200"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                <div
+                    ref={chatContainerRef}
+                    className="bg-white p-4 rounded-lg border border-gray-200 h-80 overflow-y-auto flex flex-col space-y-3 mb-4 custom-scrollbar"
+                >
+                    {loadingChat ? (
+                        <p className="text-center text-gray-500">Loading chat...</p>
+                    ) : messages.length === 0 ? (
+                        <p className="text-center text-gray-500 italic">No messages yet. Start the conversation!</p>
+                    ) : (
+                        messages.map((msg, index) => (
+                            <div key={msg.id || index} className={`flex ${msg.userId === userId ? 'justify-end' : 'justify-start'}`}>
+                                <div
+                                    className={`p-3 rounded-lg max-w-[75%] break-words ${
+                                        msg.userId === userId
+                                            ? 'bg-blue-600 text-white rounded-br-none'
+                                            : 'bg-gray-200 text-gray-800 rounded-bl-none'
+                                    }`}
+                                >
+                                    <p className="font-semibold text-sm mb-1">
+                                        {msg.userId === userId ? 'You' : (msg.userName || `User ${msg.userId.substring(0, 8)}...`)}
+                                    </p>
+                                    <p className="text-base">{msg.text}</p>
+                                    <span className="text-xs opacity-75 mt-1 block">
+                                        {msg.timestamp?.toDate ? msg.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...'}
+                                    </span>
+                                </div>
+                            </div>
+                        ))
+                    )}
+                </div>
+                <div className="flex">
+                    <input
+                        type="text"
+                        className="flex-grow p-3 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
+                        placeholder="Type your group message..."
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyPress={(e) => {
+                            if (e.key === 'Enter') sendMessage();
+                        }}
+                        disabled={loadingAuth || loadingChat}
+                    />
+                    <button
+                        onClick={sendMessage}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-r-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                        disabled={loadingAuth || loadingChat || !input.trim()}
+                    >
+                        <i className="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+                <button
+                    onClick={handleClearChat}
+                    className="w-full mt-4 bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                    disabled={loadingAuth || loadingChat}
+                >
+                    Clear All Chat Messages
+                </button>
+            </div>
+        </div>
+    );
+};
+
+// NEW: PrivateChatModal Component
+const PrivateChatModal = ({ partnerUserId, partnerUserName, onClose, onMarkRead, onSendMessage }) => {
+    const { db, userId, userProfile, loadingAuth } = useAuth();
+    const [messages, setMessages] = useState([]);
+    const [input, setInput] = useState('');
+    const [loadingChat, setLoadingChat] = useState(true);
+    const chatContainerRef = useRef(null);
+    const [messageError, setMessageError] = useState('');
+
+    // Determine a consistent chat room ID for two users
+    const getPrivateChatRoomId = (uid1, uid2) => {
+        return uid1 < uid2 ? `${uid1}_${uid2}` : `${uid2}_${uid1}`;
+    };
+
+    useEffect(() => {
+        if (!db || !userId || !partnerUserId || loadingAuth) {
+            setMessageError('Chat not ready. Please wait for authentication or select a valid user.');
+            return;
+        }
+
+        const chatRoomId = getPrivateChatRoomId(userId, partnerUserId);
+        const appId = getAppId();
+        const privateChatCollectionRef = collection(db, `artifacts/${appId}/privateChats/${chatRoomId}/messages`);
+        const q = query(privateChatCollectionRef, orderBy('timestamp'), limit(50));
+
+        setLoadingChat(true);
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const fetchedMessages = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setMessages(fetchedMessages);
+            setLoadingChat(false);
+            setMessageError(''); // Clear any previous errors
+
+            onMarkRead(partnerUserId, false); // Mark this chat as read for the current user
+
+        }, (error) => {
+            console.error("Error fetching private chat messages:", error);
+            setMessageError('Failed to load private chat messages.');
+            setLoadingChat(false);
+        });
+
+        // Mark as read immediately when modal opens
+        onMarkRead(partnerUserId, false);
+
+        return () => unsubscribe();
+    }, [db, userId, partnerUserId, loadingAuth, onMarkRead]); // Added onMarkRead to dependencies
+
+    useEffect(() => {
+        if (chatContainerRef.current) {
+            chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+    }, [messages]);
+
+    const sendMessage = async () => {
+        if (!input.trim() || !userId || !partnerUserId || loadingAuth || loadingChat || !userProfile) {
+            setMessageError('Cannot send message. Input invalid or chat not ready.');
+            return;
+        }
+
+        setMessageError('');
+        const chatRoomId = getPrivateChatRoomId(userId, partnerUserId);
+        const appId = getAppId();
+        const privateChatCollectionRef = collection(db, `artifacts/${appId}/privateChats/${chatRoomId}/messages`);
+        const senderName = userProfile.name || `User_${userId.substring(0, 8)}`;
+
+        try {
+            await addDoc(privateChatCollectionRef, {
+                text: input.trim(),
+                senderId: userId,
+                senderName: senderName,
+                recipientId: partnerUserId,
+                timestamp: serverTimestamp(),
+            });
+            setInput('');
+            onMarkRead(partnerUserId, false); // Mark chat as read for sender
+            onSendMessage(partnerUserId, userId); // Notify the recipient that they have an unread message from this user
+
+        } catch (error) {
+            setMessageError('Error sending message: ' + error.message);
+            console.error("Error sending private chat message:", error);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50 animate-fade-in">
+            <div className="bg-gradient-to-br from-green-100 to-white p-6 rounded-lg shadow-xl w-full max-w-md mx-4 my-8 flex flex-col h-[80vh] transform transition-transform duration-300 hover:scale-[1.01]">
+                <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                    <div className="flex justify-between items-center mb-4 pb-2 border-b border-gray-200">
+                        <h3 className="text-xl font-bold text-gray-800">Chat with {partnerUserName}</h3>
+                        <button
+                            onClick={onClose}
+                            className="text-gray-500 hover:text-gray-700 text-2xl"
+                        >
+                            &times;
+                        </button>
+                    </div>
+                    
+                    {messageError && (
+                        <p className="text-red-600 text-center mb-4">{messageError}</p>
+                    )}
+
+                    <div
+                        ref={chatContainerRef}
+                        className="flex-grow bg-gray-50 p-4 rounded-lg border border-gray-200 overflow-y-auto flex flex-col space-y-3 mb-4 custom-scrollbar"
+                    >
+                        {loadingChat ? (
+                            <p className="text-center text-gray-500">Loading messages...</p>
+                        ) : messages.length === 0 ? (
+                            <p className="text-center text-gray-500 italic">No messages yet. Start your private conversation!</p>
+                        ) : (
+                            messages.map((msg, index) => (
+                                <div key={msg.id || index} className={`flex ${msg.senderId === userId ? 'justify-end' : 'justify-start'}`}>
+                                    <div
+                                        className={`p-3 rounded-lg max-w-[75%] break-words ${
+                                            msg.senderId === userId
+                                                ? 'bg-green-500 text-white rounded-br-none'
+                                                : 'bg-blue-200 text-gray-800 rounded-bl-none'
+                                        }`}
+                                    >
+                                        <p className="font-semibold text-sm mb-1">
+                                            {msg.senderId === userId ? 'You' : (msg.senderName || `User ${msg.senderId.substring(0, 8)}...`)}
+                                        </p>
+                                        <p className="text-base">{msg.text}</p>
+                                        <span className="text-xs opacity-75 mt-1 block">
+                                            {msg.timestamp?.toDate ? msg.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...'}
+                                        </span>
+                                    </div>
+                                </div> 
+                            ))
+                        )}
+                    </div>
+
+                    <div className="flex">
+                        <input
+                            type="text"
+                            className="flex-grow p-3 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
+                            placeholder="Type your message..."
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyPress={(e) => {
+                                if (e.key === 'Enter') sendMessage();
+                            }}
+                            disabled={loadingChat || loadingAuth}
+                        />
+                        <button
+                            onClick={sendMessage}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-r-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                            disabled={loadingChat || loadingAuth || !input.trim()}
+                        >
+                            <i className="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// New component for displaying active users
+const ActiveUsersList = ({ setShowPrivateChat, setPrivateChatWithUserId, setPrivateChatWithUserName }) => {
+    const { db, userId, loadingAuth, userProfile } = useAuth();
+    const [activeUsers, setActiveUsers] = useState([]);
+    const [unreadStatus, setUnreadStatus] = useState({}); // { partnerUserId: true/false }
+    const appId = getAppId();
+    const userPresenceCollectionRef = collection(db, `artifacts/${appId}/public/data/userPresence`);
+
+    useEffect(() => {
+        if (!db || !userId || loadingAuth || !userProfile) {
+            return;
+        }
+
+        const userDocRef = doc(userPresenceCollectionRef, userId);
+        const userName = userProfile.name || `User_${userId.substring(0, 8)}`;
+
+        // Update presence every 10 seconds
+        const updatePresence = async () => {
+            try {
+                await setDoc(userDocRef, {
+                    userName: userName,
+                    lastActive: serverTimestamp(),
+                    isOnline: true
+                }, { merge: true });
+            } catch (error) {
+                console.error("Error updating user presence:", error);
+            }
+        };
+
+        // Initial update and then every 10 seconds
+        updatePresence(); // Immediate update on mount
+        const intervalId = setInterval(updatePresence, 10000); // Update every 10 seconds
+
+        // Listener for all active users
+        const q = query(userPresenceCollectionRef);
+        const unsubscribeSnapshot = onSnapshot(q, (snapshot) => {
+            const now = Date.now();
+            const activeUsersData = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            })).filter(user => {
+                // Consider user active if lastActive was within the last 15 seconds (giving a buffer)
+                const lastActiveTime = user.lastActive?.toDate ? user.lastActive.toDate().getTime() : 0;
+                return user.isOnline && (now - lastActiveTime < 15000);
+            }).sort((a, b) => (a.userName || '').localeCompare(b.userName || '')); // Sort alphabetically by name
+
+            setActiveUsers(activeUsersData);
+        }, (error) => {
+            console.error("Error fetching active users:", error);
+        });
+
+        // Listener for unread status for the current user
+        const unreadStatusCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/unreadPrivateChats`);
+        const unsubscribeUnread = onSnapshot(unreadStatusCollectionRef, (snapshot) => {
+            const newUnreadStatus = {};
+            snapshot.docs.forEach(docSnap => {
+                newUnreadStatus[docSnap.id] = docSnap.data().hasUnread;
+            });
+            setUnreadStatus(newUnreadStatus);
+        }, (error) => {
+            console.error("Error fetching unread status:", error);
+        });
+
+
+        // Cleanup on unmount or sign out
+        return () => {
+            clearInterval(intervalId);
+            unsubscribeSnapshot();
+            unsubscribeUnread();
+            // Optionally, set user offline on unmount (best effort)
+            if (db && userId) {
+                // IMPORTANT FIX: Ensure updateDoc targets the specific user document, not the collection.
+                updateDoc(doc(userPresenceCollectionRef, userId), { isOnline: false })
+                    .catch(e => console.error("Error setting user offline on unmount:", e));
+            }
+        };
+    }, [db, userId, loadingAuth, userProfile]);
+
+    const handleUserClick = (user) => {
+        if (user.id === userId) {
+            // Clicking on self doesn't open a chat
+            console.log("Cannot open private chat with self.");
+            return;
+        }
+        setPrivateChatWithUserId(user.id);
+        setPrivateChatWithUserName(user.userName);
+        setShowPrivateChat(true);
+        console.log(`Attempting to open private chat with: ${user.userName} (ID: ${user.id})`);
+    };
+
+    return (
+        <div className="bg-gradient-to-br from-green-50 to-blue-50 p-4 rounded-lg shadow-md border border-gray-200 mt-6 animate-fade-in transform transition-transform duration-300 hover:scale-[1.01]">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h4 className="text-lg font-semibold text-gray-700 mb-3">Active Users ({activeUsers.length})</h4>
+                {activeUsers.length === 0 ? (
+                    <p className="text-gray-500 italic text-sm">No other users currently active.</p>
+                ) : (
+                    <ul className="space-y-2">
+                        {activeUsers.map(user => (
+                            <li
+                                key={user.id}
+                                className="flex items-center space-x-2 text-gray-800 cursor-pointer hover:bg-gray-50 p-2 rounded-md transition-colors"
+                                onClick={() => handleUserClick(user)}
+                            >
+                                <span className="relative flex h-2 w-2">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                                </span>
+                                <span className="font-medium text-sm">
+                                    {user.userName} {user.id === userId && "(You)"}
+                                </span>
+                                {/* Notification badge */}
+                                {user.id !== userId && unreadStatus[user.id] && (
+                                    <span className="w-2 h-2 bg-red-500 rounded-full ml-2 animate-bounce"></span>
+                                )}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </div>
+        </div>
+    );
+};
+
+// 6. Community Forum (Updated to include Group Chat, Likes, and Comments, Edit, Delete)
+const CommunityForum = ({ setShowPrivateChat, setPrivateChatWithUserId, setPrivateChatWithUserName }) => {
+    const { db, userId, loadingAuth, userProfile } = useAuth();
+    const [posts, setPosts] = useState([]);
+    const [newPostContent, setNewPostContent] = useState('');
+    const [loadingPosts, setLoadingPosts] = useState(true);
+    const [submittingPost, setSubmittingPost] = useState(false);
+    const forumPostsContainerRef = useRef(null);
+    const [message, setMessage] = useState('');
+    const [commentInputs, setCommentInputs] = useState({}); // To manage comment input for each post
+    const [editingPostId, setEditingPostId] = useState(null); // State to track which post is being edited
+    const [editedPostContent, setEditedPostContent] = useState(''); // State for content of the post being edited
+    const [showDeleteConfirmModal, setShowDeleteConfirmModal] = useState(false); // New state for delete confirmation modal
+    const [postToDeleteId, setPostToDeleteId] = useState(null); // State to store ID of post to delete
+    const [newPostImage, setNewPostImage] = useState(null); // New state for image preview for new posts
+
+
+    useEffect(() => {
+        if (!db || !userId || loadingAuth) {
+            console.log("CommunityForum: DB or userId not ready, or auth loading.");
+            return;
+        }
+
+        const appId = getAppId();
+        const postsCollectionRef = collection(db, `artifacts/${appId}/public/data/forumPosts`);
+        const q = query(postsCollectionRef, orderBy('timestamp', 'desc'));
+
+        const unsubscribe = onSnapshot(q, async (snapshot) => {
+            const fetchedPosts = [];
+            // Use Promise.all to fetch comments for all posts concurrently
+            const commentPromises = snapshot.docs.map(async docSnap => {
+                const postData = { id: docSnap.id, ...docSnap.data() };
+                const commentsCollectionRef = collection(db, `artifacts/${appId}/public/data/forumPosts/${docSnap.id}/comments`);
+                const commentsQuery = query(commentsCollectionRef, orderBy('timestamp')); // Fetch all comments for a post
+                const commentsSnapshot = await getDocs(commentsQuery);
+                const comments = commentsSnapshot.docs.map(commentDoc => ({
+                    id: commentDoc.id,
+                    ...commentDoc.data()
+                }));
+                return { ...postData, comments: comments };
+            });
+            fetchedPosts.push(...(await Promise.all(commentPromises)));
+            setPosts(fetchedPosts);
+            setLoadingPosts(false);
+        }, (error) => {
+            console.error("Error fetching forum posts:", error);
+            setMessage('Failed to load forum posts.');
+            setLoadingPosts(false);
+        });
+
+        return () => unsubscribe();
+    }, [db, userId, loadingAuth]);
+
+    useEffect(() => {
+        if (forumPostsContainerRef.current) {
+            forumPostsContainerRef.current.scrollTop = 0;
+        }
+    }, [posts]);
+
+    // Handle image file selection for new post and convert to Base64
+    const handleNewPostImageChange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                setNewPostImage(reader.result); // Base64 string
+            };
+            reader.onerror = (error) => {
+                console.error("Error reading file:", error);
+                setNewPostImage(null);
+            };
+            reader.readAsDataURL(file);
+        } else {
+            setNewPostImage(null);
+        }
+    };
+
+    const clearNewPostImage = () => {
+        setNewPostImage(null);
+        document.getElementById('newPostImageUpload').value = ''; // Clear file input
+    };
+
+
+    const submitPost = async () => {
+        if ((!newPostContent.trim() && !newPostImage) || submittingPost || !userId || !db || loadingAuth || !userProfile) {
+            console.log("CommunityForum: Cannot submit post. Input invalid, submitting, or app not ready.");
+            setMessage("Post content or image is required.");
+            return;
+        }
+
+        setSubmittingPost(true);
+        setMessage('');
+
+        const appId = getAppId();
+        const postsCollectionRef = collection(db, `artifacts/${appId}/public/data/forumPosts`);
+        const userName = userProfile.name || `User_${userId.substring(0, 8)}`; // Get username
+
+        try {
+            await addDoc(postsCollectionRef, {
+                content: newPostContent.trim(),
+                userId: userId,
+                userName: userName, // Store username with post
+                timestamp: serverTimestamp(),
+                likes: [], // Initialize likes array
+                commentsCount: 0, // Initialize comments count
+                imageUrl: newPostImage // Include image URL if available
+            });
+            setNewPostContent('');
+            setNewPostImage(null); // Clear selected image after sending
+            document.getElementById('newPostImageUpload').value = ''; // Clear file input
+            setMessage('Post submitted successfully!');
+            setTimeout(() => setMessage(''), 3000);
+        } catch (error) {
+            setMessage('Error submitting post: ' + error.message);
+            console.error("Error submitting forum post:", error);
+        } finally {
+            setSubmittingPost(false);
+        }
+    };
+
+    // Function to trigger delete confirmation modal
+    const handleDeleteClick = (postId, postUserId) => {
+        if (postUserId !== userId) {
+            setMessage("You can only delete your own posts.");
+            return;
+        }
+        setPostToDeleteId(postId);
+        setShowDeleteConfirmModal(true);
+    };
+
+    // Function to confirm and proceed with deletion
+    const confirmDelete = async () => {
+        setShowDeleteConfirmModal(false); // Hide the modal
+        if (!postToDeleteId) return; // Should not happen if triggered correctly
+
+        if (!db || loadingAuth) {
+            setMessage('App is not ready. Please wait.');
+            return;
+        }
+
+        const appId = getAppId();
+        const postDocRef = doc(db, `artifacts/${appId}/public/data/forumPosts`, postToDeleteId);
+
+        try {
+            // Delete comments subcollection first
+            const commentsRef = collection(postDocRef, 'comments');
+            const commentsSnapshot = await getDocs(commentsRef);
+            const batch = writeBatch(db);
+            commentsSnapshot.docs.forEach((commentDoc) => {
+                batch.delete(commentDoc.ref);
+            });
+            await batch.commit();
+
+            // Then delete the post itself
+            await deleteDoc(postDocRef);
+            setMessage('Post deleted successfully!');
+            setTimeout(() => setMessage(''), 3000);
+        } catch (error) {
+            setMessage('Error deleting post: ' + error.message);
+            console.error("Error deleting forum post:", error);
+        } finally {
+            setPostToDeleteId(null); // Clear the post ID
+        }
+    };
+
+    // Function to cancel deletion
+    const cancelDelete = () => {
+        setShowDeleteConfirmModal(false);
+        setPostToDeleteId(null);
+        setMessage(''); // Clear any message
+    };
+
+
+    const handleLikePost = async (postId, currentLikes) => {
+        if (!userId || !db || loadingAuth) {
+            setMessage('App is not ready. Please wait for authentication.');
+            return;
+        }
+
+        const appId = getAppId();
+        const postDocRef = doc(db, `artifacts/${appId}/public/data/forumPosts`, postId);
+
+        try {
+            let updatedLikes;
+            if (currentLikes.includes(userId)) {
+                // User already liked, so unlike
+                updatedLikes = currentLikes.filter(id => id !== userId);
+            } else {
+                // User hasn't liked, so like
+                updatedLikes = [...currentLikes, userId];
+            }
+            await updateDoc(postDocRef, { likes: updatedLikes });
+        } catch (error) {
+            setMessage('Error liking post: ' + error.message);
+            console.error("Error updating likes:", error);
+        }
+    };
+
+    const handleCommentInputChange = (postId, value) => {
+        setCommentInputs(prev => ({ ...prev, [postId]: value }));
+    };
+
+    const handleAddComment = async (postId) => {
+        const commentContent = commentInputs[postId];
+        if (!commentContent || !commentContent.trim() || !userId || !db || loadingAuth || !userProfile) {
+            setMessage('Please enter a comment.');
+            return;
+        }
+
+        const appId = getAppId();
+        const commentsCollectionRef = collection(db, `artifacts/${appId}/public/data/forumPosts/${postId}/comments`);
+        const postDocRef = doc(db, `artifacts/${appId}/public/data/forumPosts`, postId);
+        const userName = userProfile.name || `User_${userId.substring(0, 8)}`;
+
+        try {
+            await addDoc(commentsCollectionRef, {
+                text: commentContent.trim(),
+                userId: userId,
+                userName: userName,
+                timestamp: serverTimestamp(),
+            });
+            // Increment commentsCount on the parent post
+            await updateDoc(postDocRef, {
+                commentsCount: (posts.find(p => p.id === postId)?.commentsCount || 0) + 1
+            });
+            setCommentInputs(prev => ({ ...prev, [postId]: '' })); // Clear input
+            setMessage('Comment added!');
+            setTimeout(() => setMessage(''), 3000);
+        } catch (error) {
+            setMessage('Error adding comment: ' + error.message);
+            console.error("Error adding comment:", error);
+        }
+    };
+
+    const handleEditClick = (post) => {
+        setEditingPostId(post.id);
+        setEditedPostContent(post.content);
+    };
+
+    const handleSaveEdit = async (postId) => {
+        // IMPORTANT: For simplicity, image editing is not supported on existing posts.
+        // If a post has an image, it will remain. User can only edit text content.
+        if (!editedPostContent.trim() || !userId || !db || loadingAuth) {
+            setMessage('Edited content cannot be empty.');
+            return;
+        }
+        setMessage('');
+
+        const appId = getAppId();
+        const postDocRef = doc(db, `artifacts/${appId}/public/data/forumPosts`, postId);
+
+        try {
+            await updateDoc(postDocRef, {
+                content: editedPostContent.trim(),
+                editedAt: serverTimestamp() // Add an edited timestamp
+            });
+            setEditingPostId(null); // Exit edit mode
+            setEditedPostContent('');
+            setMessage('Post updated successfully!');
+            setTimeout(() => setMessage(''), 3000);
+        } catch (error) {
+            setMessage('Error updating post: ' + error.message);
+            console.error("Error updating post:", error);
+        }
+    };
+
+    const handleCancelEdit = () => {
+        setEditingPostId(null);
+        setEditedPostContent('');
+    };
+
+
+    return (
+        <div className="p-6 bg-gradient-to-br from-indigo-50 to-purple-50 rounded-lg shadow-lg max-w-4xl mx-auto my-8 animate-fade-in">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h2 className="text-3xl font-bold text-gray-800 mb-6 text-center">Community Forum</h2>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="md:col-span-2">
+                        <GroupChat />
+                    </div>
+                    <div className="md:col-span-1">
+                        <ActiveUsersList setShowPrivateChat={setShowPrivateChat} setPrivateChatWithUserId={setPrivateChatWithUserId} setPrivateChatWithUserName={setPrivateChatWithUserName} />
+                    </div>
+                </div>
+
+
+                <div className="mt-8 mb-6 border p-4 rounded-lg bg-gray-50 transform transition-transform duration-300 hover:scale-[1.01]">
+                    <h3 className="text-xl font-semibold mb-3 text-gray-700">Create a New Forum Post:</h3>
+                    <textarea
+                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-800"
+                        rows="4"
+                        placeholder="Share your skill-related insights, ask questions, or help others..."
+                        value={newPostContent}
+                        onChange={(e) => setNewPostContent(e.target.value)}
+                        disabled={submittingPost || loadingAuth}
+                    ></textarea>
+                    {newPostImage && (
+                        <div className="mt-3 mb-3 p-3 bg-blue-100 rounded-lg flex items-center justify-between shadow-inner">
+                            <img src={newPostImage} alt="Post image preview" className="h-16 w-16 object-cover rounded-md mr-3" />
+                            <span className="text-sm text-gray-700 truncate">Image selected</span>
+                            <button onClick={clearNewPostImage} className="ml-3 text-red-500 hover:text-red-700">
+                                <i className="fas fa-times-circle"></i>
+                            </button>
+                        </div>
+                    )}
+                    <div className="flex justify-between items-center mt-3">
+                        <label htmlFor="newPostImageUpload" className="flex items-center space-x-2 bg-gray-400 hover:bg-gray-500 text-white font-semibold py-2 px-4 rounded-lg cursor-pointer transition duration-300 ease-in-out" title="Upload Image">
+                            <i className="fas fa-image"></i>
+                            <span>Add Image</span>
+                            <input
+                                type="file"
+                                id="newPostImageUpload"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={handleNewPostImageChange}
+                                disabled={submittingPost || loadingAuth}
+                            />
+                        </label>
+                        <button
+                            onClick={submitPost}
+                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-5 rounded-lg shadow-md transition duration-300 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                            disabled={submittingPost || loadingAuth || (!newPostContent.trim() && !newPostImage)}
+                        >
+                            {submittingPost ? 'Posting...' : 'Submit Post'}
+                        </button>
+                    </div>
+                    {message && (
+                        <p className="mt-2 text-red-600 text-center font-medium">{message}</p>
+                    )}
+                </div>
+
+                <h3 className="text-2xl font-bold text-gray-700 mb-4">Recent Forum Posts:</h3>
+                <div ref={forumPostsContainerRef} className="bg-gray-100 p-4 rounded-lg border border-gray-200 h-96 overflow-y-auto custom-scrollbar">
+                    {loadingPosts ? (
+                        <p className="text-center text-gray-500">Loading posts...</p>
+                    ) : posts.length === 0 ? (
+                        <p className="text-center text-gray-500 italic">No posts yet. Be the first to share!</p>
+                    ) : (
+                        <div className="space-y-4">
+                            {posts.map((post) => (
+                                <div key={post.id} className="bg-white p-4 rounded-lg shadow-sm border border-gray-100 relative transform transition-transform duration-300 hover:scale-[1.01]">
+                                    {editingPostId === post.id ? (
+                                        // Edit mode
+                                        <div>
+                                            <textarea
+                                                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-gray-800 mb-2"
+                                                rows="4"
+                                                value={editedPostContent}
+                                                onChange={(e) => setEditedPostContent(e.target.value)}
+                                            ></textarea>
+                                            <div className="flex justify-end space-x-2">
+                                                <button
+                                                    onClick={() => handleSaveEdit(post.id)}
+                                                    className="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg text-sm disabled:opacity-50 transform hover:scale-105"
+                                                    disabled={!editedPostContent.trim()}
+                                                >
+                                                    Save
+                                                </button>
+                                                <button
+                                                    onClick={handleCancelEdit}
+                                                    className="bg-gray-300 hover:bg-gray-400 text-gray-800 font-semibold py-2 px-4 rounded-lg text-sm transform hover:scale-105"
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        // Display mode
+                                        <>
+                                            <p className="text-gray-800 text-base leading-relaxed mb-2">{post.content}</p>
+                                            {post.imageUrl && (
+                                                <img src={post.imageUrl} alt="Post attachment" className="mt-2 mb-2 rounded-md max-w-full h-auto" />
+                                            )}
+                                        </>
+                                    )}
+
+                                    <div className="text-gray-500 text-xs flex justify-between items-center mt-2">
+                                        <span>
+                                            Posted by {post.userId === userId ? 'You' : (post.userName || `User ID: ${post.userId.substring(0, 8)}...`)}
+                                            {' '}on {post.timestamp?.toDate ? post.timestamp.toDate().toLocaleString() : '...'}
+                                            {post.editedAt && (
+                                                <span className="ml-2 italic">(Edited at {post.editedAt.toDate().toLocaleString()})</span>
+                                            )}
+                                        </span>
+                                        {post.userId === userId && (
+                                            <div className="flex space-x-2">
+                                                <button
+                                                    onClick={() => handleEditClick(post)}
+                                                    className="text-blue-500 hover:text-blue-700 p-1 rounded-full hover:bg-blue-100 transition duration-200"
+                                                    title="Edit your post"
+                                                >
+                                                    <i className="fas fa-edit"></i>
+                                                </button>
+                                                <button
+                                                    onClick={() => handleDeleteClick(post.id, post.userId)}
+                                                    className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100 transition duration-200"
+                                                    title="Delete your post"
+                                                >
+                                                    <i className="fas fa-trash"></i>
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Likes Section */}
+                                    <div className="mt-3 pt-3 border-t border-gray-100 flex items-center space-x-4">
+                                        <button
+                                            onClick={() => handleLikePost(post.id, post.likes || [])}
+                                            className={`flex items-center space-x-1 p-2 rounded-full transition duration-200
+                                                        ${post.likes && post.likes.includes(userId) ? 'text-red-500 bg-red-100' : 'text-gray-500 hover:text-red-500 hover:bg-gray-100'}`}
+                                            title={post.likes && post.likes.includes(userId) ? 'Unlike this post' : 'Like this post'}
+                                            disabled={loadingAuth}
+                                        >
+                                            <i className={`fas fa-heart ${post.likes && post.likes.includes(userId) ? 'text-red-500' : ''}`}></i>
+                                            <span className="text-sm font-semibold">{post.likes?.length || 0}</span>
+                                        </button>
+                                        <span className="text-gray-500 text-sm flex items-center">
+                                            <i className="fas fa-comment ml-3 mr-1"></i>
+                                            <span className="font-semibold">{post.commentsCount || 0}</span> Comments
+                                        </span>
+                                    </div>
+
+                                    {/* Comments Section */}
+                                    <div className="mt-4 border-t border-gray-100 pt-4">
+                                        <h4 className="text-md font-semibold text-gray-700 mb-2">Comments:</h4>
+                                        {post.comments && post.comments.length > 0 ? (
+                                            <ul className="space-y-2">
+                                                {post.comments.map(comment => (
+                                                    <li key={comment.id} className="bg-gray-50 p-2 rounded-lg text-sm border border-gray-200">
+                                                        <p className="text-gray-800">{comment.text}</p>
+                                                        <span className="text-gray-500 text-xs block mt-1">
+                                                            {comment.userName || `User ${comment.userId.substring(0, 8)}...`}
+                                                            {' '}at {comment.timestamp?.toDate ? comment.timestamp.toDate().toLocaleString() : '...'}
+                                                        </span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        ) : (
+                                            <p className="text-gray-500 text-sm italic">No comments yet.</p>
+                                        )}
+
+                                        <div className="flex mt-3 gap-2">
+                                            <input
+                                                type="text"
+                                                className="flex-grow p-2 border border-gray-300 rounded-lg text-sm focus:ring-1 focus:ring-blue-500"
+                                                placeholder="Add a comment..."
+                                                value={commentInputs[post.id] || ''}
+                                                onChange={(e) => handleCommentInputChange(post.id, e.target.value)}
+                                                onKeyPress={(e) => {
+                                                    if (e.key === 'Enter') handleAddComment(post.id);
+                                                }}
+                                                disabled={loadingAuth}
+                                            />
+                                            <button
+                                                onClick={() => handleAddComment(post.id)}
+                                                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                disabled={loadingAuth || !commentInputs[post.id]?.trim()}
+                                            >
+                                                Comment
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                {/* Custom Delete Confirmation Modal */}
+                {showDeleteConfirmModal && (
+                    <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-xl text-center transform transition-transform duration-300 animate-bounce-in-fade-out">
+                            <p className="mb-4 text-lg font-semibold">Are you sure you want to delete this post and all its comments?</p>
+                            <div className="flex justify-center space-x-4">
+                                <button
+                                    onClick={confirmDelete}
+                                    className="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg transform hover:scale-105"
+                                >
+                                    Yes, Delete
+                                </button>
+                                <button
+                                    onClick={cancelDelete}
+                                    className="bg-gray-300 hover:bg-gray-400 text-gray-800 font-semibold py-2 px-4 rounded-lg transform hover:scale-105"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
+// --- NEW: NavBar Component for navigation ---
+const NavBar = ({ currentPage, setCurrentPage }) => {
+    const { signOutUser } = useAuth();
+
+    const navItems = [
+        { name: 'Home', component: 'Home', icon: 'fas fa-home' },
+        { name: 'AI Chatbot', component: 'Chatbot', icon: 'fas fa-comments' },
+        { name: 'Skill Library', component: 'SkillLibrary', icon: 'fas fa-book' },
+        { name: 'AI Assessment', component: 'PersonalizationAI', icon: 'fas fa-brain' },
+        { name: 'Community Forum', component: 'CommunityForum', icon: 'fas fa-users' },
+    ];
+
+    return (
+        <nav className="bg-gray-800 p-4 shadow-xl fixed w-full z-10 top-0">
+            <div className="container mx-auto flex flex-wrap justify-center items-center">
+                {navItems.map((item) => (
+                    <button
+                        key={item.name}
+                        onClick={() => setCurrentPage(item.component)}
+                        className={`
+                            px-4 py-2 mx-1 sm:mx-2 rounded-lg text-lg font-medium transition duration-300 ease-in-out
+                            flex items-center space-x-2
+                            ${currentPage === item.component
+                                ? 'bg-blue-600 text-white shadow-md'
+                                : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+                            }
+                            transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500
+                            mb-2 sm:mb-0 text-sm sm:text-base
+                        `}
+                    >
+                        <i className={item.icon}></i>
+                        <span>{item.name}</span>
+                    </button>
+                ))}
+                <button
+                    onClick={signOutUser}
+                    className="px-4 py-2 mx-1 sm:mx-2 rounded-lg text-lg font-medium transition duration-300 ease-in-out
+                                bg-red-600 text-white hover:bg-red-700 shadow-md transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-500
+                                mb-2 sm:mb-0 text-sm sm:text-base"
+                >
+                    <i className="fas fa-sign-out-alt"></i>
+                    <span>Sign Out</span>
+                </button>
+            </div>
+        </nav>
+    );
+};
+
+// --- HomePage Component ---
+const HomePage = ({ setCurrentPage }) => {
+    const { userProfile, authReady } = useAuth();
+    const [robotMessage, setRobotMessage] = useState('');
+    const [showRobotMessage, setShowRobotMessage] = useState(false);
+    const messageTimerRef = useRef(null);
+    const hasGreetedThisSession = useRef(false); // To ensure "Welcome back" is shown only once per browser session after login.
+
+    const motivationalMessages = [
+        "Keep up the great work!",
+        "What new skill will you master today?",
+        "Every step forward is progress!",
+        "Ready for your daily dose of wisdom?",
+        "The journey of a thousand miles begins with a single step.",
+        "Learning is a treasure that will follow its owner everywhere.",
+        "Don't stop until you're proud!",
+        "The best way to predict the future is to create it."
+    ];
+
+    useEffect(() => {
+        // Clear any existing timer when the effect re-runs
+        if (messageTimerRef.current) {
+            clearTimeout(messageTimerRef.current);
+        }
+
+        if (authReady && userProfile && userProfile.name) {
+            let messageToShow;
+            if (!hasGreetedThisSession.current) {
+                // Only greet on the very first time userProfile is loaded and valid in this session
+                messageToShow = `Welcome back, ${userProfile.name}! Let's learn something new today!`;
+                hasGreetedThisSession.current = true; // Mark as greeted
+            } else {
+                // For subsequent visits to Home, show a random message
+                const randomIndex = Math.floor(Math.random() * motivationalMessages.length);
+                messageToShow = motivationalMessages[randomIndex];
+            }
+
+            setRobotMessage(messageToShow);
+            setShowRobotMessage(true);
+
+            messageTimerRef.current = setTimeout(() => {
+                setShowRobotMessage(false);
+            }, 5000); // Message disappears after 5 seconds
+        } else if (authReady && !userProfile) {
+            // If auth is ready but no user profile (e.g., logged out), hide message
+            setShowRobotMessage(false);
+            setRobotMessage('');
+            hasGreetedThisSession.current = false; // Reset for next login
+        }
+
+        return () => {
+            if (messageTimerRef.current) {
+                clearTimeout(messageTimerRef.current);
+            }
+        };
+    }, [userProfile, authReady, setCurrentPage]); // setCurrentPage as dependency means it re-runs when switching to Home.
+
+    const features = [
+        { name: 'AI Companion', description: 'Chat and learn interactively with our AI.', icon: 'fas fa-comments', page: 'Chatbot', color: 'text-green-500' },
+        { name: 'Skill Hub', description: 'Curate and manage your learning and teaching skills.', icon: 'fas fa-book', page: 'SkillLibrary', color: 'text-orange-500' },
+        { name: 'AI Assessment', description: 'Gauge your knowledge and find personalized learning paths.', icon: 'fas fa-brain', page: 'PersonalizationAI', color: 'text-red-500' },
+        { name: 'Community Connect', description: 'Engage with fellow learners and share insights in forum and chat.', icon: 'fas fa-users', page: 'CommunityForum', color: 'text-indigo-500' },
+    ];
+
+    return (
+        <div className="p-8 bg-gradient-to-br from-blue-100 to-white rounded-lg shadow-2xl max-w-5xl mx-auto my-12 transform transition-transform duration-300 pt-20 animate-fade-in">
+            <div className="bg-white bg-opacity-90 p-4 rounded-lg"> {/* Added wrapper for readability */}
+                <h2 className="text-5xl font-extrabold text-gray-900 mb-6 leading-tight text-center">
+                    Empower Your Learning Journey!
+                </h2>
+                <p className="text-xl text-gray-700 mb-10 max-w-3xl mx-auto text-center">
+                    Your all-in-one platform for mastering new skills. Discover, learn, track, and connect.
+                </p>
+
+                {/* Combined section for Spline and Daily Advice for better alignment */}
+                <div className="flex flex-col md:flex-row items-start gap-8 mb-10">
+                    {/* Spline 3D Animation (Smaller, on the side) */}
+                    <div className="w-full md:w-1/2 lg:w-1/3 xl:w-1/4 flex-shrink-0 text-center order-1 md:order-2 relative"> {/* Added relative for absolute positioning */}
+                        <div className="w-full h-48 md:h-64 lg:h-80 bg-gray-200 rounded-lg overflow-hidden shadow-xl mx-auto relative flex items-center justify-center">
+                             {/* Centering the spline viewer within its container */}
+                            <spline-viewer url="https://prod.spline.design/kcvVd4Zji1B81WHr/scene.splinecode" className="w-full h-full"></spline-viewer>
+                        </div>
+                        <p className="mt-3 text-md text-gray-700">
+                            Explore the interconnected world of skills.
+                        </p>
+
+                        {/* Message Bubble */}
+                        {showRobotMessage && (
+                            <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-full
+                                            bg-blue-600 text-white text-sm px-4 py-2 rounded-lg shadow-lg
+                                            z-20 transition-opacity duration-500 ease-in-out"
+                                 style={{ opacity: showRobotMessage ? 1 : 0 }}>
+                                {robotMessage}
+                                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-full w-0 h-0
+                                                border-l-8 border-l-transparent border-r-8 border-r-transparent
+                                                border-t-8 border-t-blue-600"></div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Daily Advice Section (Main content area) */}
+                    <div className="flex-grow w-full order-2 md:order-1">
+                        <DailyAdvice />
+                    </div>
+                </div>
+
+
+                <GamificationDashboard />
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mt-10">
+                    {features.map((feature, index) => (
+                        <div
+                            key={index}
+                            className="p-6 bg-white rounded-xl shadow-lg hover:shadow-xl hover:scale-105 transition-all duration-300 flex flex-col items-center text-center cursor-pointer border border-gray-100"
+                            onClick={() => setCurrentPage(feature.page)}
+                        >
+                            <i className={`${feature.icon} ${feature.color} text-5xl mb-4 transform hover:rotate-6 transition-transform duration-300`}></i>
+                            <h3 className="text-2xl font-bold text-gray-800 mb-2">{feature.name}</h3>
+                            <p className="text-gray-600 text-md leading-relaxed">{feature.description}</p>
+                            <button className="mt-4 text-blue-600 hover:text-blue-800 font-semibold flex items-center space-x-1">
+                                <span>Explore</span> <i className="fas fa-arrow-right text-sm"></i>
+                            </button>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="mt-12 text-center">
+                    <h3 className="text-3xl font-bold text-gray-800 mb-4">Ready to get started?</h3>
+                    <p className="text-lg text-gray-700 mb-6">
+                        Navigate through the sections above or click on a feature card to dive in!
+                    </p>
+                    <button
+                        onClick={() => setCurrentPage('Chatbot')}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 flex items-center justify-center mx-auto space-x-2"
+                    >
+                        <i className="fas fa-arrow-right"></i>
+                        <span>Explore Features</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// NEW wrapper component for all content that relies on AuthContext
+const MainAppContent = () => {
+    const [currentPage, setCurrentPage] = useState('Home');
+    const { userId, loadingAuth, authReady, db, userProfile } = useAuth(); // Destructure db and userProfile
+    const [showPrivateChat, setShowPrivateChat] = useState(false);
+    const [privateChatWithUserId, setPrivateChatWithUserId] = useState(null);
+    const [privateChatWithUserName, setPrivateChatWithUserName] = useState('');
+
+    const appId = getAppId();
+
+    // Function to mark a private chat as read/unread for the current user
+    const markPrivateChatStatus = async (partnerId, isUnread) => {
+        if (!db || !userId) return;
+        const unreadStatusDocRef = doc(db, `artifacts/${appId}/users/${userId}/unreadPrivateChats`, partnerId);
+        try {
+            if (isUnread) {
+                await setDoc(unreadStatusDocRef, { hasUnread: true, timestamp: serverTimestamp() }, { merge: true });
+            } else {
+                await updateDoc(unreadStatusDocRef, { hasUnread: false, timestamp: serverTimestamp() });
+            }
+        } catch (error) {
+            console.error("Error updating unread status:", error);
+        }
+    };
+
+    // Function to notify a recipient of an unread message
+    const notifyRecipientOfUnread = async (recipientId, senderId) => {
+        if (!db) return;
+        const recipientUnreadStatusDocRef = doc(db, `artifacts/${appId}/users/${recipientId}/unreadPrivateChats`, senderId);
+        try {
+            await setDoc(recipientUnreadStatusDocRef, { hasUnread: true, timestamp: serverTimestamp() }, { merge: true });
+        } catch (error) {
+            console.error("Error setting unread status for recipient:", error);
+        }
+    };
+
+
+    // Effect to handle user presence updates
+    useEffect(() => {
+        if (!db || !userId || !userProfile) {
+            return;
+        }
+
+        const userPresenceDocRef = doc(db, `artifacts/${appId}/public/data/userPresence`, userId);
+        const userName = userProfile.name || `User_${userId.substring(0, 8)}`;
+
+        const updatePresence = async () => {
+            try {
+                await setDoc(userPresenceDocRef, {
+                    userName: userName,
+                    lastActive: serverTimestamp(),
+                    isOnline: true
+                }, { merge: true });
+            } catch (error) {
+                console.error("Error updating user presence:", error);
+            }
+        };
+
+        // Set up interval to periodically update presence
+        const intervalId = setInterval(updatePresence, 10000); // Update every 10 seconds
+
+        // Set user offline when component unmounts or user signs out
+        const handleBeforeUnload = () => {
+            if (userId && db) {
+                updateDoc(userPresenceDocRef, { isOnline: false })
+                    .catch(e => console.error("Error setting user offline on unload:", e));
+            }
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+
+        // Initial update
+        updatePresence();
+
+        return () => {
+            clearInterval(intervalId);
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+            // Ensure user is marked offline on component unmount
+            if (userId && db) {
+                updateDoc(userPresenceDocRef, { isOnline: false })
+                    .catch(e => console.error("Error setting user offline on unmount:", e));
+            }
+        };
+    }, [userId, db, userProfile, appId]);
+
+
+    if (loadingAuth || !authReady) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-100">
+                <div className="text-xl text-gray-700 animate-pulse">Loading application...</div>
+            </div>
+        );
+    }
+
+    // If no user is logged in, show the AuthPage
+    if (!userId) {
+        return <AuthPage />;
+    }
+
+    return (
+        <>
+            <NavBar currentPage={currentPage} setCurrentPage={setCurrentPage} />
+            <main className="flex-grow w-full px-4 pb-10 pt-24 sm:pt-28 lg:pt-32">
+                {currentPage === 'Home' && <HomePage setCurrentPage={setCurrentPage} />}
+                {currentPage === 'Chatbot' && <Chatbot />}
+                {currentPage === 'SkillLibrary' && <SkillLibrary />}
+                {currentPage === 'PersonalizationAI' && <PersonalizationAI />}
+                {currentPage === 'CommunityForum' &&
+                    <CommunityForum
+                        setShowPrivateChat={setShowPrivateChat}
+                        setPrivateChatWithUserId={setPrivateChatWithUserId}
+                        setPrivateChatWithUserName={setPrivateChatWithUserName}
+                    />
+                }
+            </main>
+
+            {showPrivateChat && privateChatWithUserId && (
+                <PrivateChatModal
+                    partnerUserId={privateChatWithUserId}
+                    partnerUserName={privateChatWithUserName}
+                    onClose={() => {
+                        setShowPrivateChat(false);
+                        setPrivateChatWithUserId(null);
+                        setPrivateChatWithUserName('');
+                    }}
+                    onMarkRead={markPrivateChatStatus}
+                    onSendMessage={notifyRecipientOfUnread}
+                />
+            )}
+
+            <footer className="w-full bg-gray-800 text-gray-300 py-6 text-center text-sm shadow-inner mt-auto">
+                <p>
+                    &copy; {new Date().getFullYear()} Personalized Skill Developer. All rights reserved.
+                    {userId && <span className="ml-4">Current User ID: {userId}</span>}
+                    {!userId && !loadingAuth && <span className="ml-4 text-red-400">User not authenticated.</span>}
+                    {loadingAuth && <span className="ml-4 text-gray-400">Authenticating...</span>}
+                </p>
+            </footer>
+        </>
+    );
+};
+
+
+// 7. Main App Component
+const App = () => {
+    const keyframesCss = `
+        @keyframes slideUpForm {
+            0% { transform: translateY(20px); opacity: 0; }
+            100% { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes bounce-in-fade-out {
+            0% { opacity: 0; transform: translateY(50px); }
+            20% { opacity: 1; transform: translateY(0); }
+            80% { opacity: 1; transform: translateY(0); }
+            100% { opacity: 0; transform: translateY(50px); }
+        }
+        @keyframes fade-in {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* Custom scrollbar styles */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    `;
+
+    useEffect(() => {
+        // Dynamically add the Spline Viewer script
+        const script = document.createElement('script');
+        script.type = 'module';
+        script.src = 'https://unpkg.com/@splinetool/viewer@1.10.2/build/spline-viewer.js';
+        document.head.appendChild(script);
+
+        return () => {
+            // Clean up the script when the component unmounts (optional, but good practice)
+            document.head.removeChild(script);
+        };
+    }, []);
+
+    return (
+        <AuthProvider>
+            <style>{keyframesCss}</style>
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+            <script src="https://cdn.tailwindcss.com"></script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+
+            <div className="min-h-screen bg-gray-100 flex flex-col items-center font-inter">
+                <ErrorBoundary>
+                    <MainAppContent />
+                </ErrorBoundary>
+            </div>
+        </AuthProvider>
+    );
+};
+
+export default App;
